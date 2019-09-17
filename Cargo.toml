@@ -1,0 +1,8 @@
+[package]
+name = "gcmalloc"
+version = "0.1.0"
+authors = ["Jacob Hughes <jh@jakehughes.uk>"]
+edition = "2018"
+
+[dependencies]
+libc = "*"
