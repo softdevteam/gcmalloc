@@ -189,7 +189,7 @@ impl<'a> Iterator for AllocListIter<'a> {
 
 impl AllocList {
     fn new() -> AllocList {
-        let raw = unsafe { libc::malloc(SIZE_ALLOC_INFO as libc::size_t) } as *mut Block;
+        let raw = unsafe { libc::malloc(SIZE_ALLOC_INFO as libc::size_t) } as *const Block;
         AllocList {
             start: raw,
             next_free: 0,
