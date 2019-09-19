@@ -39,7 +39,10 @@
 #![crate_type = "rlib"]
 #![feature(core_intrinsics)]
 
-use std::alloc::{GlobalAlloc, Layout};
+use std::{
+    alloc::{GlobalAlloc, Layout},
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 struct GCMalloc;
 
@@ -48,11 +51,39 @@ static ALLOCATOR: GCMalloc = GCMalloc;
 
 static SIZE_ALLOC_INFO: usize = (1024 * 1024) * 2; // 2KB
 static mut ALLOC_INFO: Option<AllocList> = None;
+/// A spinlock for the global ALLOC_INFO list.
+///
+/// System allocators are generally thread-safe, but gcmalloc reads and writes
+/// metadata about each allocation to shared memory upon returning from the
+/// system allocator call. This requires additional synchronisation mechanisms.
+/// It is not possible to use `sys::Sync::Mutex` for this purpose as the
+/// implementation includes a heap allocation containing a `pthread_mutex`. This
+/// would cause infinite recursion when initialising the lock as the allocator
+/// would call itself.
+///
+/// Instead, we use a simple global spinlock built on an atomic bool to guard
+/// access to the ALLOC_INFO list.
+static ALLOC_LOCK: AllocLock = AllocLock(AtomicBool::new(false));
+
+struct AllocLock(AtomicBool);
+
+impl AllocLock {
+    fn lock(&self) {
+        while !self.0.compare_and_swap(false, true, Ordering::AcqRel) {
+            // Spin
+        }
+    }
+
+    fn unlock(&self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
 
 unsafe impl GlobalAlloc for GCMalloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ptr = libc::malloc(layout.size() as libc::size_t) as *mut u8;
 
+        ALLOC_LOCK.lock();
         match ALLOC_INFO {
             Some(ref mut pm) => pm.insert(ptr as usize, layout.size()),
             None => {
@@ -61,17 +92,21 @@ unsafe impl GlobalAlloc for GCMalloc {
                 ALLOC_INFO = Some(al);
             }
         };
+        ALLOC_LOCK.unlock();
         ptr
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
         libc::free(ptr as *mut libc::c_void);
+        ALLOC_LOCK.lock();
         ALLOC_INFO.as_mut().unwrap().remove(ptr as usize);
+        ALLOC_LOCK.unlock();
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, _layout: Layout, new_size: usize) -> *mut u8 {
         let new_ptr = libc::realloc(ptr as *mut libc::c_void, new_size) as *mut u8;
 
+        ALLOC_LOCK.lock();
         if ptr.is_null() {
             // realloc is equivalent to malloc if called with a null pointer,
             // thus we must insert the new block info in the ALLOC_INFO list.
@@ -85,6 +120,7 @@ unsafe impl GlobalAlloc for GCMalloc {
                 .unwrap()
                 .update(ptr as usize, new_ptr as usize, new_size);
         }
+        ALLOC_LOCK.unlock();
         new_ptr
     }
 }
@@ -223,6 +259,16 @@ impl AllocList {
 
     /// Given an arbitrary pointer (base or inner), finds pointer info of the
     /// associated base pointer if it exists.
+    ///
+    /// # Safety
+    ///
+    /// This method is *not* thread-safe. It is the caller's responsibility to
+    /// ensure that no allocation takes place while the `ALLOC_INFO` list is
+    /// being read from.
+    ///
+    /// In conservative GC, this guarantee is implicit as this method is only
+    /// ever called during a stop-the-world stack scanning phase where we can be
+    /// certain no mutator threads are running.
     fn find_base(&self, ptr: usize) -> Option<PtrInfo> {
         self.iter().find_map(|x| {
             if let Block::Entry(base_ptr, size) = *x {
@@ -276,7 +322,6 @@ struct PtrInfo {
     ptr: usize,
     size: usize,
 }
-
 
 fn abort() {
     unsafe { core::intrinsics::abort() };
