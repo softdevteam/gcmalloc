@@ -38,18 +38,7 @@
 #![crate_name = "gcmalloc"]
 #![crate_type = "rlib"]
 #![feature(core_intrinsics)]
-// Allocators are not allowed to depend on the standard library which in turn
-// requires an allocator in order to avoid circular dependencies. This crate,
-// however, can use all of libcore.
-#![feature(no_std)]
-#![no_std]
 
-// Our system allocator will use the in-tree libc crate for FFI bindings. Note
-// that currently the external (crates.io) libc cannot be used because it links
-// to the standard library (e.g. `#![no_std]` isn't stable yet), so that's why
-// this specifically requires the in-tree version.
-
-extern crate libc;
 
 static SIZE_ALLOC_TABLE: usize = (1024 * 1024) * 2; // 2KB
 
@@ -239,67 +228,6 @@ static mut PTR_METADATA: Option<AllocList> = None;
 
 fn abort() {
     unsafe { core::intrinsics::abort() };
-}
-
-/// ============================================================================
-/// Listed below are the five allocation functions currently required by custom
-/// allocators.
-///
-/// Note that the standard `malloc` and `realloc` functions do not provide a way
-/// to communicate alignment.
-/// ============================================================================
-
-#[no_mangle]
-pub extern "C" fn __rust_allocate(size: usize, _align: usize) -> *mut u8 {
-    unsafe {
-        let ptr = libc::malloc(size as libc::size_t) as *mut u8;
-        match PTR_METADATA {
-            Some(ref mut pm) => pm.insert(ptr as usize, size),
-            None => {
-                let mut al = AllocList::new();
-                al.insert(ptr as usize, size);
-                PTR_METADATA = Some(al);
-            }
-        }
-        ptr
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn __rust_deallocate(ptr: *mut u8, _old_size: usize, _align: usize) {
-    unsafe {
-        libc::free(ptr as *mut libc::c_void);
-        PTR_METADATA.as_mut().unwrap().remove(ptr as usize);
-    };
-}
-
-#[no_mangle]
-pub extern "C" fn __rust_reallocate(
-    ptr: *mut u8,
-    _old_size: usize,
-    size: usize,
-    _align: usize,
-) -> *mut u8 {
-    unsafe {
-        let ptr = libc::realloc(ptr as *mut libc::c_void, size as libc::size_t) as *mut u8;
-        PTR_METADATA.as_mut().unwrap().update(ptr as usize, size);
-        ptr
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn __rust_reallocate_inplace(
-    _ptr: *mut u8,
-    old_size: usize,
-    _size: usize,
-    _align: usize,
-) -> usize {
-    old_size // this api is not supported by libc
-}
-
-#[no_mangle]
-pub extern "C" fn __rust_usable_size(size: usize, _align: usize) -> usize {
-    size
 }
 
 #[cfg(test)]
