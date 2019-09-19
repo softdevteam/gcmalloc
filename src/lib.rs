@@ -40,7 +40,7 @@
 #![feature(core_intrinsics)]
 
 
-static SIZE_ALLOC_TABLE: usize = (1024 * 1024) * 2; // 2KB
+static SIZE_ALLOC_INFO: usize = (1024 * 1024) * 2; // 2KB
 
 /// A contiguous chunk of memory which records metadata about each pointer
 /// allocated by the allocator. Any pointer can be queried during runtime to
@@ -75,7 +75,7 @@ impl<'a> Iterator for AllocListIterMut<'a> {
         // It's UB to call `.add` on a pointer past its allocation bounds, so we
         // need to check that it's within range before turning it into a pointer
         // and dereferencing it
-        if self.idx * core::mem::size_of::<Block>() >= SIZE_ALLOC_TABLE {
+        if self.idx * core::mem::size_of::<Block>() >= SIZE_ALLOC_INFO {
             return None;
         }
 
@@ -92,7 +92,7 @@ impl<'a> Iterator for AllocListIter<'a> {
     fn next(&mut self) -> Option<&'a Block> {
         // It's UB to call `.add` on a pointer past its allocation bounds, so we
         // need to check that it's within range before turning it into a pointer
-        if self.idx * core::mem::size_of::<Block>() >= SIZE_ALLOC_TABLE {
+        if self.idx * core::mem::size_of::<Block>() >= SIZE_ALLOC_INFO {
             return None;
         }
 
@@ -106,7 +106,7 @@ impl<'a> Iterator for AllocListIter<'a> {
 
 impl AllocList {
     fn new() -> AllocList {
-        let raw = unsafe { libc::malloc(SIZE_ALLOC_TABLE as libc::size_t) } as *mut Block;
+        let raw = unsafe { libc::malloc(SIZE_ALLOC_INFO as libc::size_t) } as *mut Block;
         AllocList {
             start: raw,
             next_free: 0,
@@ -135,7 +135,7 @@ impl AllocList {
         if self.can_bump {
             unsafe {
                 let next_ptr = self.start.add(self.next_free) as *mut Block;
-                if (next_ptr as usize) < self.start as usize + SIZE_ALLOC_TABLE {
+                if (next_ptr as usize) < self.start as usize + SIZE_ALLOC_INFO {
                     *next_ptr = Block::Entry(core::num::NonZeroUsize::new_unchecked(ptr), size);
                     self.next_free += 1;
                     return;
@@ -271,7 +271,7 @@ mod tests {
     fn can_alloc_a_freed_block() {
         let mut al = AllocList::new();
 
-        let num_ptrs = SIZE_ALLOC_TABLE / core::mem::size_of::<Block>();
+        let num_ptrs = SIZE_ALLOC_INFO / core::mem::size_of::<Block>();
         for i in 0..num_ptrs {
             al.insert(i, 1);
         }
