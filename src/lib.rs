@@ -38,20 +38,92 @@
 #![crate_name = "gcmalloc"]
 #![crate_type = "rlib"]
 #![feature(core_intrinsics)]
-// Allocators are not allowed to depend on the standard library which in turn
-// requires an allocator in order to avoid circular dependencies. This crate,
-// however, can use all of libcore.
-#![feature(no_std)]
-#![no_std]
 
-// Our system allocator will use the in-tree libc crate for FFI bindings. Note
-// that currently the external (crates.io) libc cannot be used because it links
-// to the standard library (e.g. `#![no_std]` isn't stable yet), so that's why
-// this specifically requires the in-tree version.
+use std::{
+    alloc::{GlobalAlloc, Layout},
+    sync::atomic::{AtomicBool, Ordering},
+};
 
-extern crate libc;
+struct GCMalloc;
 
-static SIZE_ALLOC_TABLE: usize = (1024 * 1024) * 2; // 2KB
+#[global_allocator]
+static ALLOCATOR: GCMalloc = GCMalloc;
+
+static SIZE_ALLOC_INFO: usize = (1024 * 1024) * 2; // 2KB
+static mut ALLOC_INFO: Option<AllocList> = None;
+/// A spinlock for the global ALLOC_INFO list.
+///
+/// System allocators are generally thread-safe, but gcmalloc reads and writes
+/// metadata about each allocation to shared memory upon returning from the
+/// system allocator call. This requires additional synchronisation mechanisms.
+/// It is not possible to use `sys::Sync::Mutex` for this purpose as the
+/// implementation includes a heap allocation containing a `pthread_mutex`. This
+/// would cause infinite recursion when initialising the lock as the allocator
+/// would call itself.
+///
+/// Instead, we use a simple global spinlock built on an atomic bool to guard
+/// access to the ALLOC_INFO list.
+static ALLOC_LOCK: AllocLock = AllocLock(AtomicBool::new(false));
+
+struct AllocLock(AtomicBool);
+
+impl AllocLock {
+    fn lock(&self) {
+        while !self.0.compare_and_swap(false, true, Ordering::AcqRel) {
+            // Spin
+        }
+    }
+
+    fn unlock(&self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+unsafe impl GlobalAlloc for GCMalloc {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let ptr = libc::malloc(layout.size() as libc::size_t) as *mut u8;
+
+        ALLOC_LOCK.lock();
+        match ALLOC_INFO {
+            Some(ref mut pm) => pm.insert(ptr as usize, layout.size()),
+            None => {
+                let mut al = AllocList::new();
+                al.insert(ptr as usize, layout.size());
+                ALLOC_INFO = Some(al);
+            }
+        };
+        ALLOC_LOCK.unlock();
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+        libc::free(ptr as *mut libc::c_void);
+        ALLOC_LOCK.lock();
+        ALLOC_INFO.as_mut().unwrap().remove(ptr as usize);
+        ALLOC_LOCK.unlock();
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, _layout: Layout, new_size: usize) -> *mut u8 {
+        let new_ptr = libc::realloc(ptr as *mut libc::c_void, new_size) as *mut u8;
+
+        ALLOC_LOCK.lock();
+        if ptr.is_null() {
+            // realloc is equivalent to malloc if called with a null pointer,
+            // thus we must insert the new block info in the ALLOC_INFO list.
+            ALLOC_INFO.as_mut().unwrap().insert(ptr as usize, new_size);
+        } else {
+            // In all other cases, the memory block is resized and a new ptr
+            // is returned. This may differ from the original ptr if the new
+            // block is too large to fit in the same space as the old block
+            ALLOC_INFO
+                .as_mut()
+                .unwrap()
+                .update(ptr as usize, new_ptr as usize, new_size);
+        }
+        ALLOC_LOCK.unlock();
+        new_ptr
+    }
+}
 
 /// A contiguous chunk of memory which records metadata about each pointer
 /// allocated by the allocator. Any pointer can be queried during runtime to
@@ -86,7 +158,7 @@ impl<'a> Iterator for AllocListIterMut<'a> {
         // It's UB to call `.add` on a pointer past its allocation bounds, so we
         // need to check that it's within range before turning it into a pointer
         // and dereferencing it
-        if self.idx * core::mem::size_of::<Block>() >= SIZE_ALLOC_TABLE {
+        if self.idx * core::mem::size_of::<Block>() >= SIZE_ALLOC_INFO {
             return None;
         }
 
@@ -103,7 +175,7 @@ impl<'a> Iterator for AllocListIter<'a> {
     fn next(&mut self) -> Option<&'a Block> {
         // It's UB to call `.add` on a pointer past its allocation bounds, so we
         // need to check that it's within range before turning it into a pointer
-        if self.idx * core::mem::size_of::<Block>() >= SIZE_ALLOC_TABLE {
+        if self.idx * core::mem::size_of::<Block>() >= SIZE_ALLOC_INFO {
             return None;
         }
 
@@ -117,7 +189,7 @@ impl<'a> Iterator for AllocListIter<'a> {
 
 impl AllocList {
     fn new() -> AllocList {
-        let raw = unsafe { libc::malloc(SIZE_ALLOC_TABLE as libc::size_t) } as *mut Block;
+        let raw = unsafe { libc::malloc(SIZE_ALLOC_INFO as libc::size_t) } as *const Block;
         AllocList {
             start: raw,
             next_free: 0,
@@ -143,10 +215,13 @@ impl AllocList {
     /// point, insertion is O(n) while it linearly scans the list for the next
     /// free entry.
     fn insert(&mut self, ptr: usize, size: usize) {
+        debug_assert_ne!(ptr, 0);
+        debug_assert_ne!(size, 0);
+
         if self.can_bump {
             unsafe {
                 let next_ptr = self.start.add(self.next_free) as *mut Block;
-                if (next_ptr as usize) < self.start as usize + SIZE_ALLOC_TABLE {
+                if (next_ptr as usize) < self.start as usize + SIZE_ALLOC_INFO {
                     *next_ptr = Block::Entry(core::num::NonZeroUsize::new_unchecked(ptr), size);
                     self.next_free += 1;
                     return;
@@ -184,6 +259,16 @@ impl AllocList {
 
     /// Given an arbitrary pointer (base or inner), finds pointer info of the
     /// associated base pointer if it exists.
+    ///
+    /// # Safety
+    ///
+    /// This method is *not* thread-safe. It is the caller's responsibility to
+    /// ensure that no allocation takes place while the `ALLOC_INFO` list is
+    /// being read from.
+    ///
+    /// In conservative GC, this guarantee is implicit as this method is only
+    /// ever called during a stop-the-world stack scanning phase where we can be
+    /// certain no mutator threads are running.
     fn find_base(&self, ptr: usize) -> Option<PtrInfo> {
         self.iter().find_map(|x| {
             if let Block::Entry(base_ptr, size) = *x {
@@ -200,11 +285,14 @@ impl AllocList {
 
     /// Updates the size associated with a base pointer (perfomed on a realloc).
     /// This must not be called with an inner pointer.
-    fn update(&mut self, ptr: usize, size: usize) {
+    fn update(&mut self, ptr: usize, new_ptr: usize, size: usize) {
         for block in self.iter_mut() {
             if let Block::Entry(base_ptr, _) = *block {
                 if ptr == base_ptr.get() {
-                    *block = Block::Entry(base_ptr, size);
+                    *block = Block::Entry(
+                        unsafe { core::num::NonZeroUsize::new_unchecked(new_ptr) },
+                        size,
+                    );
                     return;
                 }
             }
@@ -235,71 +323,8 @@ struct PtrInfo {
     size: usize,
 }
 
-static mut PTR_METADATA: Option<AllocList> = None;
-
 fn abort() {
     unsafe { core::intrinsics::abort() };
-}
-
-/// ============================================================================
-/// Listed below are the five allocation functions currently required by custom
-/// allocators.
-///
-/// Note that the standard `malloc` and `realloc` functions do not provide a way
-/// to communicate alignment.
-/// ============================================================================
-
-#[no_mangle]
-pub extern "C" fn __rust_allocate(size: usize, _align: usize) -> *mut u8 {
-    unsafe {
-        let ptr = libc::malloc(size as libc::size_t) as *mut u8;
-        match PTR_METADATA {
-            Some(ref mut pm) => pm.insert(ptr as usize, size),
-            None => {
-                let mut al = AllocList::new();
-                al.insert(ptr as usize, size);
-                PTR_METADATA = Some(al);
-            }
-        }
-        ptr
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn __rust_deallocate(ptr: *mut u8, _old_size: usize, _align: usize) {
-    unsafe {
-        libc::free(ptr as *mut libc::c_void);
-        PTR_METADATA.as_mut().unwrap().remove(ptr as usize);
-    };
-}
-
-#[no_mangle]
-pub extern "C" fn __rust_reallocate(
-    ptr: *mut u8,
-    _old_size: usize,
-    size: usize,
-    _align: usize,
-) -> *mut u8 {
-    unsafe {
-        let ptr = libc::realloc(ptr as *mut libc::c_void, size as libc::size_t) as *mut u8;
-        PTR_METADATA.as_mut().unwrap().update(ptr as usize, size);
-        ptr
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn __rust_reallocate_inplace(
-    _ptr: *mut u8,
-    old_size: usize,
-    _size: usize,
-    _align: usize,
-) -> usize {
-    old_size // this api is not supported by libc
-}
-
-#[no_mangle]
-pub extern "C" fn __rust_usable_size(size: usize, _align: usize) -> usize {
-    size
 }
 
 #[cfg(test)]
@@ -343,9 +368,9 @@ mod tests {
     fn can_alloc_a_freed_block() {
         let mut al = AllocList::new();
 
-        let num_ptrs = SIZE_ALLOC_TABLE / core::mem::size_of::<Block>();
+        let num_ptrs = SIZE_ALLOC_INFO / core::mem::size_of::<Block>();
         for i in 0..num_ptrs {
-            al.insert(i, 1);
+            al.insert(i + 1, 1);
         }
 
         // // Free the pointer in the middle of the list
