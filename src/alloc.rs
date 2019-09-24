@@ -66,10 +66,10 @@ unsafe impl GlobalAlloc for GCMalloc {
 
         ALLOC_LOCK.lock();
         match ALLOC_INFO {
-            Some(ref mut pm) => pm.insert(ptr as usize, layout.size()),
+            Some(ref mut pm) => pm.insert(ptr as usize, layout.size(), false),
             None => {
                 let mut al = AllocList::new();
-                al.insert(ptr as usize, layout.size());
+                al.insert(ptr as usize, layout.size(), false);
                 ALLOC_INFO = Some(al);
             }
         };
@@ -91,7 +91,10 @@ unsafe impl GlobalAlloc for GCMalloc {
         if ptr.is_null() {
             // realloc is equivalent to malloc if called with a null pointer,
             // thus we must insert the new block info in the ALLOC_INFO list.
-            ALLOC_INFO.as_mut().unwrap().insert(ptr as usize, new_size);
+            ALLOC_INFO
+                .as_mut()
+                .unwrap()
+                .insert(ptr as usize, new_size, false);
         } else {
             // In all other cases, the memory block is resized and a new ptr
             // is returned. This may differ from the original ptr if the new
@@ -213,7 +216,7 @@ impl AllocList {
     /// Performs fast bump pointer insertion until the list is full, at which
     /// point, insertion is O(n) while it linearly scans the list for the next
     /// free entry.
-    pub(crate) fn insert(&mut self, ptr: usize, size: usize) {
+    pub(crate) fn insert(&mut self, ptr: usize, size: usize, gc: bool) {
         debug_assert_ne!(ptr, 0);
         debug_assert_ne!(size, 0);
 
@@ -221,7 +224,7 @@ impl AllocList {
             unsafe {
                 let next_ptr = self.start.add(self.next_free) as *mut Block;
                 if (next_ptr as usize) < self.start as usize + SIZE_ALLOC_INFO {
-                    *next_ptr = Block::Entry(core::num::NonZeroUsize::new_unchecked(ptr), size);
+                    *next_ptr = Block::Entry(core::num::NonZeroUsize::new_unchecked(ptr), size, gc);
                     self.next_free += 1;
                     return;
                 } else {
@@ -234,7 +237,11 @@ impl AllocList {
         // heap.
         for block in self.iter_mut() {
             if let Block::Free = block {
-                *block = Block::Entry(unsafe { core::num::NonZeroUsize::new_unchecked(ptr) }, size);
+                *block = Block::Entry(
+                    unsafe { core::num::NonZeroUsize::new_unchecked(ptr) },
+                    size,
+                    gc,
+                );
                 return;
             }
         }
@@ -247,7 +254,7 @@ impl AllocList {
     /// dealloc). This must not be called with an inner pointer.
     pub(crate) fn remove(&mut self, ptr: usize) {
         for block in self.iter_mut() {
-            if let Block::Entry(base_ptr, _) = block {
+            if let Block::Entry(base_ptr, ..) = block {
                 if base_ptr.get() == ptr {
                     *block = Block::Free;
                     return;
@@ -270,11 +277,12 @@ impl AllocList {
     /// certain no mutator threads are running.
     pub(crate) fn find_base(&self, ptr: usize) -> Option<PtrInfo> {
         self.iter().find_map(|x| {
-            if let Block::Entry(base_ptr, size) = *x {
+            if let Block::Entry(base_ptr, size, gc) = *x {
                 if ptr >= base_ptr.get() && ptr < (base_ptr.get() + size as usize) {
                     return Some(PtrInfo {
                         ptr: base_ptr.get(),
                         size,
+                        gc,
                     });
                 }
             }
@@ -286,11 +294,12 @@ impl AllocList {
     /// This must not be called with an inner pointer.
     pub(crate) fn update(&mut self, ptr: usize, new_ptr: usize, size: usize) {
         for block in self.iter_mut() {
-            if let Block::Entry(base_ptr, _) = *block {
+            if let Block::Entry(base_ptr, _size, gc) = *block {
                 if ptr == base_ptr.get() {
                     *block = Block::Entry(
                         unsafe { core::num::NonZeroUsize::new_unchecked(new_ptr) },
                         size,
+                        gc,
                     );
                     return;
                 }
@@ -308,7 +317,7 @@ enum Block {
     // adhere to this too, encoding the pointer as a NonZeroUsize means that the
     // value for 0 can be used to encode the discriminant tag. This reduces the
     // size of a `Block` from 3 machine words to 2.
-    Entry(core::num::NonZeroUsize, usize),
+    Entry(core::num::NonZeroUsize, usize, bool),
 }
 
 /// The metadata for each ptr is only 2 machine words which means that copying
@@ -320,6 +329,7 @@ enum Block {
 pub struct PtrInfo {
     pub ptr: usize,
     pub size: usize,
+    pub gc: bool,
 }
 
 fn abort() {
@@ -333,8 +343,12 @@ mod tests {
     #[test]
     fn insert_and_find_ptr() {
         let mut al = AllocList::new();
-        let pm = PtrInfo { ptr: 1234, size: 4 };
-        al.insert(pm.ptr, pm.size);
+        let pm = PtrInfo {
+            ptr: 1234,
+            size: 4,
+            gc: false,
+        };
+        al.insert(pm.ptr, pm.size, pm.gc);
 
         assert_eq!(al.find_base(pm.ptr).unwrap(), pm)
     }
@@ -342,9 +356,13 @@ mod tests {
     #[test]
     fn find_inner_ptr() {
         let mut al = AllocList::new();
-        let pm = PtrInfo { ptr: 1234, size: 4 };
+        let pm = PtrInfo {
+            ptr: 1234,
+            size: 4,
+            gc: false,
+        };
 
-        al.insert(pm.ptr, pm.size);
+        al.insert(pm.ptr, pm.size, pm.gc);
 
         assert_eq!(al.find_base(1235).unwrap(), pm);
         assert_eq!(al.find_base(1236).unwrap(), pm);
@@ -355,8 +373,12 @@ mod tests {
     #[test]
     fn free_block() {
         let mut al = AllocList::new();
-        let pm = PtrInfo { ptr: 1234, size: 4 };
-        al.insert(pm.ptr, pm.size);
+        let pm = PtrInfo {
+            ptr: 1234,
+            size: 4,
+            gc: false,
+        };
+        al.insert(pm.ptr, pm.size, pm.gc);
 
         al.remove(pm.ptr);
 
@@ -369,14 +391,31 @@ mod tests {
 
         let num_ptrs = SIZE_ALLOC_INFO / core::mem::size_of::<Block>();
         for i in 0..num_ptrs {
-            al.insert(i + 1, 1);
+            al.insert(i + 1, 1, false);
         }
 
         // // Free the pointer in the middle of the list
         al.remove(num_ptrs / 2);
-        let pm = PtrInfo { ptr: 1234, size: 1 };
-        al.insert(pm.ptr, pm.size);
+        let pm = PtrInfo {
+            ptr: 1234,
+            size: 1,
+            gc: false,
+        };
+        al.insert(pm.ptr, pm.size, pm.gc);
 
         assert_eq!(al.find_base(pm.ptr).unwrap(), pm);
+    }
+
+    #[test]
+    fn record_gc_alloc() {
+        let mut al = AllocList::new();
+        let pm = PtrInfo {
+            ptr: 1234,
+            size: 4,
+            gc: true,
+        };
+        al.insert(pm.ptr, pm.size, pm.gc);
+
+        assert!(al.find_base(1234).unwrap().gc);
     }
 }
