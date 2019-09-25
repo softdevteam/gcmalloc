@@ -40,7 +40,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-static SIZE_ALLOC_INFO: usize = (1024 * 1024) * 2; // 2KB
+static SIZE_ALLOC_INFO: usize = (1024 * 1024) * 2; // 2MiB
 
 static mut ALLOC_INFO: Option<AllocList> = None;
 
