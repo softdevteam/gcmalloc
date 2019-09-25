@@ -38,10 +38,15 @@
 #![crate_name = "gcmalloc"]
 #![crate_type = "rlib"]
 #![feature(core_intrinsics)]
+#![feature(allocator_api)]
 
 mod alloc;
 
-use crate::alloc::GCMalloc;
+use crate::alloc::{AllocWithInfo, GCMalloc};
 
 #[global_allocator]
-static ALLOCATOR: GCMalloc = GCMalloc;
+static ALLOCATOR: AllocWithInfo = AllocWithInfo;
+
+/// Used for allocation of objects which are managed by the collector (through
+/// the `Gc` smart pointer interface).
+static mut GC_ALLOCATOR: GCMalloc = GCMalloc;

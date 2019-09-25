@@ -36,7 +36,8 @@
 // SOFTWARE.
 
 use std::{
-    alloc::{GlobalAlloc, Layout},
+    alloc::{Alloc, AllocErr, GlobalAlloc, Layout},
+    ptr::NonNull,
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -58,9 +59,9 @@ static mut ALLOC_INFO: Option<AllocList> = None;
 /// access to the ALLOC_INFO list.
 static ALLOC_LOCK: AllocLock = AllocLock::new();
 
-pub struct GCMalloc;
+pub struct AllocWithInfo;
 
-unsafe impl GlobalAlloc for GCMalloc {
+unsafe impl GlobalAlloc for AllocWithInfo {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ptr = libc::malloc(layout.size() as libc::size_t) as *mut u8;
 
@@ -106,6 +107,50 @@ unsafe impl GlobalAlloc for GCMalloc {
         }
         ALLOC_LOCK.unlock();
         new_ptr
+    }
+}
+
+pub struct GCMalloc;
+
+unsafe impl Alloc for GCMalloc {
+    unsafe fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocErr> {
+        let ptr = libc::malloc(layout.size() as libc::size_t) as *mut u8;
+
+        ALLOC_LOCK.lock();
+        match ALLOC_INFO {
+            Some(ref mut pm) => pm.insert(ptr as usize, layout.size(), true),
+            None => {
+                let mut al = AllocList::new();
+                al.insert(ptr as usize, layout.size(), true);
+                ALLOC_INFO = Some(al);
+            }
+        };
+        ALLOC_LOCK.unlock();
+        Ok(NonNull::new_unchecked(ptr))
+    }
+
+    unsafe fn dealloc(&mut self, ptr: NonNull<u8>, _layout: Layout) {
+        libc::free(ptr.as_ptr() as *mut libc::c_void);
+        ALLOC_LOCK.lock();
+        ALLOC_INFO.as_mut().unwrap().remove(ptr.as_ptr() as usize);
+        ALLOC_LOCK.unlock();
+    }
+
+    unsafe fn realloc(
+        &mut self,
+        ptr: NonNull<u8>,
+        _layout: Layout,
+        new_size: usize,
+    ) -> Result<NonNull<u8>, AllocErr> {
+        let new_ptr = libc::realloc(ptr.as_ptr() as *mut libc::c_void, new_size) as *mut u8;
+
+        ALLOC_LOCK.lock();
+        ALLOC_INFO
+            .as_mut()
+            .unwrap()
+            .update(ptr.as_ptr() as usize, new_ptr as usize, new_size);
+        ALLOC_LOCK.unlock();
+        Ok(NonNull::new_unchecked(new_ptr))
     }
 }
 
