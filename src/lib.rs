@@ -39,10 +39,16 @@
 #![crate_type = "rlib"]
 #![feature(core_intrinsics)]
 #![feature(allocator_api)]
+#![feature(alloc_layout_extra)]
 
 mod alloc;
 
 use crate::alloc::{AllocWithInfo, GCMalloc};
+use std::{
+    alloc::{Alloc, Layout},
+    mem::{forget, size_of},
+    ptr,
+};
 
 #[global_allocator]
 static ALLOCATOR: AllocWithInfo = AllocWithInfo;
@@ -50,3 +56,69 @@ static ALLOCATOR: AllocWithInfo = AllocWithInfo;
 /// Used for allocation of objects which are managed by the collector (through
 /// the `Gc` smart pointer interface).
 static mut GC_ALLOCATOR: GCMalloc = GCMalloc;
+
+struct Gc<T> {
+    objptr: *mut T,
+}
+
+impl<T> Gc<T> {
+    pub fn new(v: T) -> Self {
+        let objptr = Self::alloc_blank(Layout::new::<T>());
+        let gc = unsafe {
+            objptr.copy_from_nonoverlapping(&v, 1);
+            Gc::from_raw(objptr)
+        };
+        forget(v);
+        gc
+    }
+
+    /// Create a `Gc` from a raw pointer previously created by `alloc_blank` or
+    /// `into_raw`.
+    pub unsafe fn from_raw(objptr: *const T) -> Self {
+        Gc {
+            objptr: objptr as *mut T,
+        }
+    }
+
+    /// Allocate memory sufficient to `l` (i.e. correctly aligned and of at
+    /// least the required size). The returned pointer must be passed to
+    /// `Gc::from_raw`.
+    pub fn alloc_blank(l: Layout) -> *mut T {
+        let (layout, uoff) = Layout::new::<usize>().extend(l).unwrap();
+        // In order for our storage scheme to work, it's necessary that `uoff -
+        // sizeof::<usize>()` gives a valid alignment for a `usize`. There are
+        // only two cases we need to consider here:
+        //   1) `object`'s alignment is smaller than or equal to `usize`. If so,
+        //      no padding will be added, at which point by definition `uoff -
+        //      sizeof::<usize>()` will be exactly equivalent to the start point
+        //      of the layout.
+        //   2) `object`'s alignment is bigger than `usize`. Since alignment
+        //      must be a power of two, that means that we must by definition be
+        //      adding at least one exact multiple of `usize` bytes of padding.
+        unsafe {
+            let baseptr = GC_ALLOCATOR.alloc(layout).unwrap().as_ptr();
+            let objptr = baseptr.add(uoff);
+            let headerptr = objptr.sub(size_of::<usize>());
+            ptr::write(headerptr as *mut usize, 1);
+            objptr as *mut T
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{alloc::ALLOC_INFO, *};
+
+    #[test]
+    fn alloc_with_gc() {
+        let gc = Gc::new(1234);
+        let pi = unsafe {
+            ALLOC_INFO
+                .as_ref()
+                .unwrap()
+                .find_base(gc.objptr as usize)
+                .unwrap()
+        };
+        assert!(pi.gc)
+    }
+}

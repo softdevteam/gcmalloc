@@ -43,7 +43,7 @@ use std::{
 
 static SIZE_ALLOC_INFO: usize = (1024 * 1024) * 2; // 2MiB
 
-static mut ALLOC_INFO: Option<AllocList> = None;
+pub(crate) static mut ALLOC_INFO: Option<AllocList> = None;
 
 /// A spinlock for the global ALLOC_INFO list.
 ///
