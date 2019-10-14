@@ -1,5 +1,6 @@
 // Run-time:
 //  status: error
+//  stderr: Allocation failed: Metadata list full
 
 extern crate gcmalloc;
 
