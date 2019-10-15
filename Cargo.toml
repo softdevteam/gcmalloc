@@ -6,3 +6,13 @@ edition = "2018"
 
 [dependencies]
 libc = "*"
+
+[dev-dependencies]
+lang_tester = "0.3"
+tempdir = "0.3"
+
+[[test]]
+name = "gc_tests"
+path = "gc_tests/run_tests.rs"
+harness = false
+
