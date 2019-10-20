@@ -47,6 +47,7 @@ use crate::alloc::{AllocMetadata, AllocWithInfo, GCMalloc};
 use std::{
     alloc::{Alloc, Layout},
     mem::{forget, size_of},
+    ops::Deref,
     ptr,
 };
 
@@ -57,9 +58,13 @@ static ALLOCATOR: AllocWithInfo = AllocWithInfo;
 /// the `Gc` smart pointer interface).
 static mut GC_ALLOCATOR: GCMalloc = GCMalloc;
 
-struct Gc<T> {
+#[derive(Clone, Copy)]
+pub struct Gc<T> {
     objptr: *mut T,
 }
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GcHeader(usize);
 
 impl<T> Gc<T> {
     pub fn new(v: T) -> Self {
@@ -77,6 +82,24 @@ impl<T> Gc<T> {
     pub unsafe fn from_raw(objptr: *const T) -> Self {
         Gc {
             objptr: objptr as *mut T,
+        }
+    }
+
+    pub fn as_ptr(&self) -> *const T {
+        self.objptr
+    }
+
+    pub(crate) fn header(&self) -> &GcHeader {
+        unsafe {
+            let hoff = (self.objptr as *const i8).sub(size_of::<GcHeader>());
+            &*(hoff as *const GcHeader)
+        }
+    }
+
+    pub(crate) fn header_mut(&self) -> &mut GcHeader {
+        unsafe {
+            let hoff = (self.objptr as *const i8).sub(size_of::<GcHeader>());
+            &mut *(hoff as *mut GcHeader)
         }
     }
 
@@ -101,9 +124,35 @@ impl<T> Gc<T> {
 
             AllocMetadata::insert(objptr as usize, layout.size(), true);
             let headerptr = objptr.sub(size_of::<usize>());
-            ptr::write(headerptr as *mut usize, 1);
+            ptr::write(headerptr as *mut GcHeader, GcHeader::new());
             objptr as *mut T
         }
+    }
+}
+
+impl GcHeader {
+    pub(crate) fn new() -> Self {
+        Self(0)
+    }
+
+    pub(crate) fn mark_bit(&self) -> bool {
+        (self.0 & 1) == 1
+    }
+
+    pub(crate) fn set_mark_bit(&mut self, mark: bool) {
+        if mark {
+            self.0 |= 1
+        } else {
+            self.0 &= !1
+        }
+    }
+}
+
+impl<T> Deref for Gc<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        unsafe { &*(self.objptr as *const T) }
     }
 }
 
