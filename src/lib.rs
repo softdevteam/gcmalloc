@@ -43,7 +43,7 @@
 
 mod alloc;
 
-use crate::alloc::{AllocWithInfo, GCMalloc};
+use crate::alloc::{AllocMetadata, AllocWithInfo, GCMalloc};
 use std::{
     alloc::{Alloc, Layout},
     mem::{forget, size_of},
@@ -98,6 +98,8 @@ impl<T> Gc<T> {
         unsafe {
             let baseptr = GC_ALLOCATOR.alloc(layout).unwrap().as_ptr();
             let objptr = baseptr.add(uoff);
+
+            AllocMetadata::insert(objptr as usize, layout.size(), true);
             let headerptr = objptr.sub(size_of::<usize>());
             ptr::write(headerptr as *mut usize, 1);
             objptr as *mut T
@@ -107,18 +109,12 @@ impl<T> Gc<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{alloc::ALLOC_INFO, *};
+    use super::*;
 
     #[test]
     fn alloc_with_gc() {
         let gc = Gc::new(1234);
-        let pi = unsafe {
-            ALLOC_INFO
-                .as_ref()
-                .unwrap()
-                .find_base(gc.objptr as usize)
-                .unwrap()
-        };
+        let pi = AllocMetadata::find(gc.objptr as usize).unwrap();
         assert!(pi.gc)
     }
 }

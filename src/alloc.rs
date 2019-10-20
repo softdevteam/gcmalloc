@@ -43,7 +43,7 @@ use std::{
 
 static SIZE_ALLOC_INFO: usize = (1024 * 1024) * 2; // 2MiB
 
-pub(crate) static mut ALLOC_INFO: Option<AllocList> = None;
+static mut ALLOC_INFO: Option<AllocList> = None;
 
 /// A spinlock for the global ALLOC_INFO list.
 ///
@@ -116,16 +116,6 @@ unsafe impl Alloc for GCMalloc {
     unsafe fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocErr> {
         let ptr = libc::malloc(layout.size() as libc::size_t) as *mut u8;
 
-        ALLOC_LOCK.lock();
-        match ALLOC_INFO {
-            Some(ref mut pm) => pm.insert(ptr as usize, layout.size(), true),
-            None => {
-                let mut al = AllocList::new();
-                al.insert(ptr as usize, layout.size(), true);
-                ALLOC_INFO = Some(al);
-            }
-        };
-        ALLOC_LOCK.unlock();
         Ok(NonNull::new_unchecked(ptr))
     }
 
@@ -154,20 +144,20 @@ unsafe impl Alloc for GCMalloc {
     }
 }
 
-pub(crate) struct AllocLock(AtomicBool);
+struct AllocLock(AtomicBool);
 
 impl AllocLock {
-    pub(crate) const fn new() -> AllocLock {
+    const fn new() -> AllocLock {
         Self(AtomicBool::new(false))
     }
 
-    pub(crate) fn lock(&self) {
+    fn lock(&self) {
         while !self.0.compare_and_swap(false, true, Ordering::AcqRel) {
             // Spin
         }
     }
 
-    pub(crate) fn unlock(&self) {
+    fn unlock(&self) {
         self.0.store(false, Ordering::Release);
     }
 }
@@ -182,7 +172,7 @@ impl AllocLock {
 /// conservative GC to know which additional machine words must be scanned.
 ///
 /// TODO: Grow the AllocList if it exceeds its size.
-pub(crate) struct AllocList {
+struct AllocList {
     start: *const Block,
     next_free: usize,
     can_bump: bool,
@@ -235,7 +225,7 @@ impl<'a> Iterator for AllocListIter<'a> {
 }
 
 impl AllocList {
-    pub(crate) fn new() -> AllocList {
+    fn new() -> AllocList {
         let raw = unsafe { libc::malloc(SIZE_ALLOC_INFO as libc::size_t) } as *const Block;
         AllocList {
             start: raw,
@@ -261,7 +251,7 @@ impl AllocList {
     /// Performs fast bump pointer insertion until the list is full, at which
     /// point, insertion is O(n) while it linearly scans the list for the next
     /// free entry.
-    pub(crate) fn insert(&mut self, ptr: usize, size: usize, gc: bool) {
+    fn insert(&mut self, ptr: usize, size: usize, gc: bool) {
         debug_assert_ne!(ptr, 0);
         debug_assert_ne!(size, 0);
 
@@ -297,7 +287,7 @@ impl AllocList {
 
     /// Remove ptr information associated with a base pointer (perfomed on a
     /// dealloc). This must not be called with an inner pointer.
-    pub(crate) fn remove(&mut self, ptr: usize) {
+    fn remove(&mut self, ptr: usize) {
         for block in self.iter_mut() {
             if let Block::Entry(base_ptr, ..) = block {
                 if base_ptr.get() == ptr {
@@ -320,7 +310,7 @@ impl AllocList {
     /// In conservative GC, this guarantee is implicit as this method is only
     /// ever called during a stop-the-world stack scanning phase where we can be
     /// certain no mutator threads are running.
-    pub(crate) fn find_base(&self, ptr: usize) -> Option<PtrInfo> {
+    fn find_base(&self, ptr: usize) -> Option<PtrInfo> {
         self.iter().find_map(|x| {
             if let Block::Entry(base_ptr, size, gc) = *x {
                 if ptr >= base_ptr.get() && ptr < (base_ptr.get() + size as usize) {
@@ -337,7 +327,7 @@ impl AllocList {
 
     /// Updates the size associated with a base pointer (perfomed on a realloc).
     /// This must not be called with an inner pointer.
-    pub(crate) fn update(&mut self, ptr: usize, new_ptr: usize, size: usize) {
+    fn update(&mut self, ptr: usize, new_ptr: usize, size: usize) {
         for block in self.iter_mut() {
             if let Block::Entry(base_ptr, _size, gc) = *block {
                 if ptr == base_ptr.get() {
@@ -380,6 +370,58 @@ pub struct PtrInfo {
 fn exit_alloc(msg: &str) {
     unsafe { libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len()) };
     std::process::exit(1);
+}
+
+// -----------------------------------------------------------------------------
+//        APIs for querying the block information about each allocation
+// -----------------------------------------------------------------------------
+
+pub struct AllocMetadata;
+
+impl AllocMetadata {
+    /// Insert metadata about an allocation block. The GC scans for reachable
+    /// objects conservatively. It uses the metadata stored against each
+    /// allocation to determine:
+    /// 1) the size of an allocation block
+    /// 2) whether an allocation block's memory management is the responsibility
+    ///    of the GC
+    /// 3) whether an arbitrary pointer-like word points within an
+    ///    allocation block
+    pub(crate) fn insert(ptr: usize, size: usize, gc: bool) {
+        ALLOC_LOCK.lock();
+        unsafe {
+            match ALLOC_INFO {
+                Some(ref mut pm) => pm.insert(ptr as usize, size, true),
+                None => {
+                    let mut al = AllocList::new();
+                    al.insert(ptr as usize, size, gc);
+                    ALLOC_INFO = Some(al);
+                }
+            };
+        }
+        ALLOC_LOCK.unlock();
+    }
+    /// Returns metadata about an allocation block when given an arbitrary
+    /// pointer to the start of the block or an offset within it.
+    pub(crate) fn find(ptr: usize) -> Option<PtrInfo> {
+        ALLOC_LOCK.lock();
+        let ptr_info = unsafe { ALLOC_INFO.as_ref().unwrap().find_base(ptr) };
+        ALLOC_LOCK.unlock();
+        ptr_info
+    }
+
+    /// Removes the metadata associated with an allocation.
+    pub(crate) fn remove(ptr: usize) {
+        ALLOC_LOCK.lock();
+
+        debug_assert!(|| -> bool {
+            let ptr_info = unsafe { ALLOC_INFO.as_ref().unwrap().find_base(ptr).unwrap() };
+            ptr_info.gc
+        }());
+
+        unsafe { ALLOC_INFO.as_mut().unwrap().remove(ptr) };
+        ALLOC_LOCK.unlock();
+    }
 }
 
 #[cfg(test)]
