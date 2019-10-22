@@ -41,9 +41,16 @@
 #![feature(allocator_api)]
 #![feature(alloc_layout_extra)]
 
-mod alloc;
+#[cfg(not(all(target_pointer_width = "64", target_arch = "x86_64")))]
+compile_error!("Requires x86_64 with 64 bit pointer width.");
 
-use crate::alloc::{AllocMetadata, AllocWithInfo, GCMalloc};
+pub mod alloc;
+pub mod gc;
+
+use crate::{
+    alloc::{AllocMetadata, AllocWithInfo, GCMalloc},
+    gc::Collector,
+};
 use std::{
     alloc::{Alloc, Layout},
     mem::{forget, size_of},
@@ -57,6 +64,8 @@ static ALLOCATOR: AllocWithInfo = AllocWithInfo;
 /// Used for allocation of objects which are managed by the collector (through
 /// the `Gc` smart pointer interface).
 static mut GC_ALLOCATOR: GCMalloc = GCMalloc;
+
+static mut COLLECTOR: Option<Collector> = None;
 
 #[derive(Clone, Copy)]
 pub struct Gc<T> {
@@ -132,7 +141,10 @@ impl<T> Gc<T> {
 
 impl GcHeader {
     pub(crate) fn new() -> Self {
-        Self(0)
+        let white = unsafe { !COLLECTOR.as_ref().unwrap().current_black() };
+        let mut header = Self(0);
+        header.set_mark_bit(white);
+        header
     }
 
     pub(crate) fn mark_bit(&self) -> bool {
@@ -156,12 +168,46 @@ impl<T> Deref for Gc<T> {
     }
 }
 
+pub fn init(flags: gc::DebugFlags) {
+    unsafe { COLLECTOR = Some(Collector::new(flags)) };
+}
+
+pub fn collect() {
+    unsafe { COLLECTOR.as_mut().unwrap().collect() }
+}
+
+pub struct Debug;
+
+impl Debug {
+    /// Returns true if the object was marked as reachable in the last collection.
+    ///
+    /// It can be misleading to check for the inverse of this function
+    /// (`!is_black(..)`). It shouldn't be relied upon for testing, as
+    /// conservative collectors tend to over-approximate and there are
+    /// non-deterministic reasons that an unreachable object might still survive
+    /// a collection: mis-identified integer, floating garbage in the red-zone,
+    /// stale pointers in registers etc.
+    pub fn is_black<T>(gc: Gc<T>) -> bool {
+        let collector = unsafe { COLLECTOR.as_ref().unwrap() };
+        let cstate = *collector.state.lock().unwrap();
+
+        // Checking an object's colour only makes sense immediately after
+        // marking has taken place. After a full collection has happened,
+        // marking results are stale and the object graph must be re-marked in
+        // order for this query to be meaningful.
+        assert_eq!(cstate, gc::CollectorState::FinishedMarking);
+        return collector.colour(unsafe { Gc::from_raw(gc.objptr as *const i8) })
+            == gc::Colour::Black;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn alloc_with_gc() {
+        init(gc::DebugFlags::new());
         let gc = Gc::new(1234);
         let pi = AllocMetadata::find(gc.objptr as usize).unwrap();
         assert!(pi.gc)
