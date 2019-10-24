@@ -41,12 +41,20 @@
 #![feature(allocator_api)]
 #![feature(alloc_layout_extra)]
 
-mod alloc;
+#[cfg(not(all(target_pointer_width = "64", target_arch = "x86_64")))]
+compile_error!("Requires x86_64 with 64 bit pointer width.");
 
-use crate::alloc::{AllocWithInfo, GCMalloc};
+pub mod alloc;
+pub mod gc;
+
+use crate::{
+    alloc::{AllocMetadata, AllocWithInfo, GCMalloc},
+    gc::Collector,
+};
 use std::{
     alloc::{Alloc, Layout},
     mem::{forget, size_of},
+    ops::Deref,
     ptr,
 };
 
@@ -57,9 +65,15 @@ static ALLOCATOR: AllocWithInfo = AllocWithInfo;
 /// the `Gc` smart pointer interface).
 static mut GC_ALLOCATOR: GCMalloc = GCMalloc;
 
-struct Gc<T> {
+static mut COLLECTOR: Option<Collector> = None;
+
+#[derive(Clone, Copy)]
+pub struct Gc<T> {
     objptr: *mut T,
 }
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GcHeader(usize);
 
 impl<T> Gc<T> {
     pub fn new(v: T) -> Self {
@@ -77,6 +91,24 @@ impl<T> Gc<T> {
     pub unsafe fn from_raw(objptr: *const T) -> Self {
         Gc {
             objptr: objptr as *mut T,
+        }
+    }
+
+    pub fn as_ptr(&self) -> *const T {
+        self.objptr
+    }
+
+    pub(crate) fn header(&self) -> &GcHeader {
+        unsafe {
+            let hoff = (self.objptr as *const i8).sub(size_of::<GcHeader>());
+            &*(hoff as *const GcHeader)
+        }
+    }
+
+    pub(crate) fn header_mut(&self) -> &mut GcHeader {
+        unsafe {
+            let hoff = (self.objptr as *const i8).sub(size_of::<GcHeader>());
+            &mut *(hoff as *mut GcHeader)
         }
     }
 
@@ -98,27 +130,86 @@ impl<T> Gc<T> {
         unsafe {
             let baseptr = GC_ALLOCATOR.alloc(layout).unwrap().as_ptr();
             let objptr = baseptr.add(uoff);
+
+            AllocMetadata::insert(objptr as usize, layout.size(), true);
             let headerptr = objptr.sub(size_of::<usize>());
-            ptr::write(headerptr as *mut usize, 1);
+            ptr::write(headerptr as *mut GcHeader, GcHeader::new());
             objptr as *mut T
         }
     }
 }
 
+impl GcHeader {
+    pub(crate) fn new() -> Self {
+        let white = unsafe { !COLLECTOR.as_ref().unwrap().current_black() };
+        let mut header = Self(0);
+        header.set_mark_bit(white);
+        header
+    }
+
+    pub(crate) fn mark_bit(&self) -> bool {
+        (self.0 & 1) == 1
+    }
+
+    pub(crate) fn set_mark_bit(&mut self, mark: bool) {
+        if mark {
+            self.0 |= 1
+        } else {
+            self.0 &= !1
+        }
+    }
+}
+
+impl<T> Deref for Gc<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        unsafe { &*(self.objptr as *const T) }
+    }
+}
+
+pub fn init(flags: gc::DebugFlags) {
+    unsafe { COLLECTOR = Some(Collector::new(flags)) };
+}
+
+pub fn collect() {
+    unsafe { COLLECTOR.as_mut().unwrap().collect() }
+}
+
+pub struct Debug;
+
+impl Debug {
+    /// Returns true if the object was marked as reachable in the last collection.
+    ///
+    /// It can be misleading to check for the inverse of this function
+    /// (`!is_black(..)`). It shouldn't be relied upon for testing, as
+    /// conservative collectors tend to over-approximate and there are
+    /// non-deterministic reasons that an unreachable object might still survive
+    /// a collection: mis-identified integer, floating garbage in the red-zone,
+    /// stale pointers in registers etc.
+    pub fn is_black<T>(gc: Gc<T>) -> bool {
+        let collector = unsafe { COLLECTOR.as_ref().unwrap() };
+        let cstate = *collector.state.lock().unwrap();
+
+        // Checking an object's colour only makes sense immediately after
+        // marking has taken place. After a full collection has happened,
+        // marking results are stale and the object graph must be re-marked in
+        // order for this query to be meaningful.
+        assert_eq!(cstate, gc::CollectorState::FinishedMarking);
+        return collector.colour(unsafe { Gc::from_raw(gc.objptr as *const i8) })
+            == gc::Colour::Black;
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{alloc::ALLOC_INFO, *};
+    use super::*;
 
     #[test]
     fn alloc_with_gc() {
+        init(gc::DebugFlags::new());
         let gc = Gc::new(1234);
-        let pi = unsafe {
-            ALLOC_INFO
-                .as_ref()
-                .unwrap()
-                .find_base(gc.objptr as usize)
-                .unwrap()
-        };
+        let pi = AllocMetadata::find(gc.objptr as usize).unwrap();
         assert!(pi.gc)
     }
 }
