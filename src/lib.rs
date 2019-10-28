@@ -26,7 +26,7 @@ use crate::{
 use std::{
     alloc::{Alloc, Layout},
     mem::{forget, size_of},
-    ops::Deref,
+    ops::{Deref, DerefMut},
     ptr,
 };
 
@@ -135,8 +135,14 @@ impl GcHeader {
 impl<T> Deref for Gc<T> {
     type Target = T;
 
-    fn deref(&self) -> &T {
+    fn deref(&self) -> &Self::Target {
         unsafe { &*(self.objptr as *const T) }
+    }
+}
+
+impl<T> DerefMut for Gc<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { &mut *(self.objptr as *mut T) }
     }
 }
 
