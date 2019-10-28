@@ -3,9 +3,7 @@
 
 extern crate gcmalloc;
 
-use gcmalloc::Gc;
-use gcmalloc::{collect, Debug };
-use gcmalloc::gc::DebugFlags;
+use gcmalloc::{collect, gc::DebugFlags, Debug, Gc};
 
 fn foo() {
     let y = Gc::new(456 as usize);

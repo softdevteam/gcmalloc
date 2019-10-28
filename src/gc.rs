@@ -13,12 +13,13 @@ use crate::{
 };
 use std::sync::Mutex;
 
-static WORD_SIZE: usize = 8; // Bytes
+static WORD_SIZE: usize = std::mem::size_of::<usize>(); // Bytes
 
-type StackAddress = usize;
-type StackValue = usize;
+type Address = usize;
 
-type StackScanCallback = extern "sysv64" fn(&mut Collector, StackAddress);
+type Word = usize;
+
+type StackScanCallback = extern "sysv64" fn(&mut Collector, Address);
 #[link(name = "SpillRegisters", kind = "static")]
 extern "sysv64" {
     // Pass a type-punned pointer to the collector and move it to the asm spill
@@ -133,20 +134,28 @@ impl Collector {
                 // block.
                 let obj = unsafe { Gc::from_raw(ptr as *const i8) };
                 if self.colour(obj) == Colour::Black {
-                    break;
+                    continue;
                 }
-
                 self.mark(obj, Colour::Black);
+            }
+
+            // Check each word in the allocation block for pointers.
+            for addr in (ptr..ptr + size).step_by(WORD_SIZE) {
+                let word = unsafe { *(addr as *const Word) };
+
+                if let Some(ptrinfo) = AllocMetadata::find(word) {
+                    self.worklist.push(ptrinfo)
+                }
             }
         }
     }
 
     #[no_mangle]
-    extern "sysv64" fn scan_stack(&mut self, rsp: StackAddress) {
-        let stack_start = unsafe { get_stack_start() }.unwrap() as usize;
+    extern "sysv64" fn scan_stack(&mut self, rsp: Address) {
+        let stack_top = unsafe { get_stack_start() }.unwrap();
 
-        for stack_address in (rsp..stack_start).step_by(WORD_SIZE) {
-            let stack_word = unsafe { *(stack_address as *const StackValue) };
+        for stack_address in (rsp..stack_top).step_by(WORD_SIZE) {
+            let stack_word = unsafe { *(stack_address as *const Word) };
             if let Some(ptr_info) = AllocMetadata::find(stack_word) {
                 self.worklist.push(ptr_info)
             }
@@ -173,7 +182,7 @@ impl Collector {
 /// is highly platform specific. It is used as the lower bound for the range of
 /// on-stack-values which are scanned for potential roots in GC.
 #[cfg(target_os = "linux")]
-unsafe fn get_stack_start() -> Option<usize> {
+unsafe fn get_stack_start() -> Option<Address> {
     let mut attr: libc::pthread_attr_t = std::mem::zeroed();
     assert_eq!(libc::pthread_attr_init(&mut attr), 0);
     let ptid = libc::pthread_self();
@@ -188,5 +197,5 @@ unsafe fn get_stack_start() -> Option<usize> {
         libc::pthread_attr_getstack(&attr, &mut stackaddr, &mut stacksize),
         0
     );
-    return Some(stackaddr as usize + stacksize);
+    return Some((stackaddr as usize + stacksize) as Address);
 }
