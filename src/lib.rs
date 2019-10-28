@@ -39,7 +39,6 @@ static mut GC_ALLOCATOR: GCMalloc = GCMalloc;
 
 static mut COLLECTOR: Option<Collector> = None;
 
-#[derive(Clone, Copy)]
 pub struct Gc<T> {
     objptr: *mut T,
 }
@@ -143,6 +142,17 @@ impl<T> Deref for Gc<T> {
 impl<T> DerefMut for Gc<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { &mut *(self.objptr as *mut T) }
+    }
+}
+
+/// `Copy` and `Clone` are implemented manually because a reference to `Gc<T>`
+/// should be copyable regardless of `T`. It differs subtly from `#[derive(Copy,
+/// Clone)]` in that the latter only makes `Gc<T>` copyable if `T` is.
+impl<T> Copy for Gc<T> {}
+
+impl<T> Clone for Gc<T> {
+    fn clone(&self) -> Self {
+        *self
     }
 }
 
