@@ -102,7 +102,10 @@ impl<T> Gc<T> {
             let baseptr = GC_ALLOCATOR.alloc(layout).unwrap().as_ptr();
             let objptr = baseptr.add(uoff);
 
-            AllocMetadata::insert(objptr as usize, layout.size(), true);
+            // size excl. header and padding
+            let objsize = layout.size() - (objptr as usize - baseptr as usize);
+            AllocMetadata::insert(objptr as usize, objsize, true);
+
             let headerptr = objptr.sub(size_of::<usize>());
             ptr::write(headerptr as *mut GcHeader, GcHeader::new());
             objptr as *mut T
