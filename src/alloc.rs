@@ -172,6 +172,12 @@ impl<'a> Iterator for AllocListIterMut<'a> {
             return None;
         }
 
+        // If we're still doing bump insertion, then there's a chunk of the list
+        // which remains uninitialized.
+        if self.alloc_list.can_bump && self.idx >= self.alloc_list.next_free {
+            return None;
+        }
+
         let ptr = self.alloc_list.start as usize + (self.idx * core::mem::size_of::<Block>());
         self.idx += 1;
 
@@ -186,6 +192,12 @@ impl<'a> Iterator for AllocListIter<'a> {
         // It's UB to call `.add` on a pointer past its allocation bounds, so we
         // need to check that it's within range before turning it into a pointer
         if self.idx * core::mem::size_of::<Block>() >= SIZE_ALLOC_INFO {
+            return None;
+        }
+
+        // If we're still doing bump insertion, then there's a chunk of the list
+        // which remains uninitialized.
+        if self.alloc_list.can_bump && self.idx >= self.alloc_list.next_free {
             return None;
         }
 
