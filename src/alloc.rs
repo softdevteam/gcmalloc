@@ -11,6 +11,7 @@ use std::{
     alloc::{Alloc, AllocErr, GlobalAlloc, Layout},
     ptr::NonNull,
     sync::atomic::{AtomicBool, Ordering},
+    mem::size_of,
 };
 
 static SIZE_ALLOC_INFO: usize = (1024 * 1024) * 2; // 2MiB
@@ -230,7 +231,8 @@ impl AllocList {
         if self.can_bump {
             unsafe {
                 let next_ptr = self.start.add(self.next_free) as *mut Block;
-                if (next_ptr as usize) < self.start as usize + SIZE_ALLOC_INFO {
+                let last = self.start as usize + SIZE_ALLOC_INFO - size_of::<Block>();
+                if (next_ptr as usize) <= last {
                     *next_ptr = Block::Entry(core::num::NonZeroUsize::new_unchecked(ptr), size, gc);
                     self.next_free += 1;
                     return;
