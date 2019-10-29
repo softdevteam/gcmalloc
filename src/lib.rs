@@ -26,7 +26,7 @@ use crate::{
 use std::{
     alloc::{Alloc, Layout},
     mem::{forget, size_of},
-    ops::Deref,
+    ops::{Deref, DerefMut},
     ptr,
 };
 
@@ -39,7 +39,6 @@ static mut GC_ALLOCATOR: GCMalloc = GCMalloc;
 
 static mut COLLECTOR: Option<Collector> = None;
 
-#[derive(Clone, Copy)]
 pub struct Gc<T> {
     objptr: *mut T,
 }
@@ -103,7 +102,10 @@ impl<T> Gc<T> {
             let baseptr = GC_ALLOCATOR.alloc(layout).unwrap().as_ptr();
             let objptr = baseptr.add(uoff);
 
-            AllocMetadata::insert(objptr as usize, layout.size(), true);
+            // size excl. header and padding
+            let objsize = layout.size() - (objptr as usize - baseptr as usize);
+            AllocMetadata::insert(objptr as usize, objsize, true);
+
             let headerptr = objptr.sub(size_of::<usize>());
             ptr::write(headerptr as *mut GcHeader, GcHeader::new());
             objptr as *mut T
@@ -135,8 +137,25 @@ impl GcHeader {
 impl<T> Deref for Gc<T> {
     type Target = T;
 
-    fn deref(&self) -> &T {
+    fn deref(&self) -> &Self::Target {
         unsafe { &*(self.objptr as *const T) }
+    }
+}
+
+impl<T> DerefMut for Gc<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { &mut *(self.objptr as *mut T) }
+    }
+}
+
+/// `Copy` and `Clone` are implemented manually because a reference to `Gc<T>`
+/// should be copyable regardless of `T`. It differs subtly from `#[derive(Copy,
+/// Clone)]` in that the latter only makes `Gc<T>` copyable if `T` is.
+impl<T> Copy for Gc<T> {}
+
+impl<T> Clone for Gc<T> {
+    fn clone(&self) -> Self {
+        *self
     }
 }
 
