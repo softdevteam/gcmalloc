@@ -397,6 +397,7 @@ impl AllocMetadata {
     }
 
     /// Removes the metadata associated with an allocation.
+    #[cfg(test)]
     pub(crate) fn remove(ptr: usize) {
         ALLOC_LOCK.lock();
 

@@ -15,6 +15,16 @@ use tempdir::TempDir;
 static CRATE_NAME: &'static str = "gcmalloc";
 
 fn main() {
+    let sanitizers: Vec<String> = match env::var("SANITIZERS") {
+        Ok(ref s) => s.split(';').map(|s| s.to_string()).collect(),
+        Err(_) => Vec::new(),
+    };
+
+    let valgrind: bool = match env::var("VALGRIND") {
+        Ok(ref s) => s == "true",
+        Err(_) => false,
+    };
+
     // We grab the rlibs from `target/<debug | release>/` but in order
     // for them to exist here, they must have been moved from `deps/`.
     // Simply running `cargo test` will not do this, instead, we must
@@ -65,6 +75,9 @@ fn main() {
             let lib_arg = [CRATE_NAME, "=", lib_path.to_str().unwrap()].concat();
             let deps_arg = ["dependency=", deps_path.to_str().unwrap()].concat();
 
+            let san_flags = sanitizers.iter().map(|x| format!("-Zsanitizer={}", x));
+            compiler.args(san_flags);
+
             compiler.args(&[
                 "--edition=2018",
                 "-o",
@@ -78,7 +91,25 @@ fn main() {
                 lib_arg.as_str(),
             ]);
 
-            let runtime = Command::new(exe);
+            assert!(
+                !(valgrind && !sanitizers.is_empty()),
+                "Valgrind can't be used on code compiled with sanitizers"
+            );
+
+            let mut runtime;
+            if valgrind {
+                let suppr_file = PathBuf::from("gc_tests/valgrind.supp");
+                let suppressions = ["--suppressions=", suppr_file.to_str().unwrap()].concat();
+                runtime = Command::new("valgrind");
+                runtime.args(&[
+                    "--error-exitcode=1",
+                    suppressions.as_str(),
+                    exe.to_str().unwrap(),
+                ]);
+            } else {
+                runtime = Command::new(exe);
+            };
+
             vec![("Compiler", compiler), ("Run-time", runtime)]
         })
         .run();
