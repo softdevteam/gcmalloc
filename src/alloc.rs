@@ -125,7 +125,7 @@ impl AllocLock {
     }
 
     fn lock(&self) {
-        while !self.0.compare_and_swap(false, true, Ordering::AcqRel) {
+        while self.0.compare_and_swap(false, true, Ordering::AcqRel) {
             // Spin
         }
     }
