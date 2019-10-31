@@ -268,7 +268,7 @@ impl AllocList {
         }
 
         // The allocation list is full
-        exit_alloc("Allocation failed: Metadata list full");
+        exit_alloc("Allocation failed: Metadata list full\n");
     }
 
     /// Remove ptr information associated with a base pointer (perfomed on a
@@ -355,7 +355,7 @@ pub struct PtrInfo {
 
 fn exit_alloc(msg: &str) {
     unsafe { libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len()) };
-    std::process::exit(1);
+    std::process::abort();
 }
 
 // -----------------------------------------------------------------------------
