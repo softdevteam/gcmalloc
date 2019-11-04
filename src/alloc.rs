@@ -24,9 +24,8 @@ static mut ALLOC_INFO: Option<AllocList> = None;
 /// metadata about each allocation to shared memory upon returning from the
 /// system allocator call. This requires additional synchronisation mechanisms.
 /// It is not possible to use `sys::Sync::Mutex` for this purpose as the
-/// implementation includes a heap allocation containing a `pthread_mutex`. This
-/// would cause infinite recursion when initialising the lock as the allocator
-/// would call itself.
+/// implementation includes a heap allocation containing a `pthread_mutex`.
+/// Since `alloc` and friends are not re-entrant, it's not possible to use this.
 ///
 /// Instead, we use a simple global spinlock built on an atomic bool to guard
 /// access to the ALLOC_INFO list.
@@ -37,48 +36,22 @@ pub struct AllocWithInfo;
 unsafe impl GlobalAlloc for AllocWithInfo {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ptr = libc::malloc(layout.size() as libc::size_t) as *mut u8;
-
-        ALLOC_LOCK.lock();
-        match ALLOC_INFO {
-            Some(ref mut pm) => pm.insert(ptr as usize, layout.size(), false),
-            None => {
-                let mut al = AllocList::new();
-                al.insert(ptr as usize, layout.size(), false);
-                ALLOC_INFO = Some(al);
-            }
-        };
-        ALLOC_LOCK.unlock();
+        AllocMetadata::insert(ptr as usize, layout.size(), false);
         ptr
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
         libc::free(ptr as *mut libc::c_void);
-        ALLOC_LOCK.lock();
-        ALLOC_INFO.as_mut().unwrap().remove(ptr as usize);
-        ALLOC_LOCK.unlock();
+        AllocMetadata::remove(ptr as usize);
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, _layout: Layout, new_size: usize) -> *mut u8 {
         let new_ptr = libc::realloc(ptr as *mut libc::c_void, new_size) as *mut u8;
 
-        ALLOC_LOCK.lock();
-        if ptr.is_null() {
-            // realloc is equivalent to malloc if called with a null pointer,
-            // thus we must insert the new block info in the ALLOC_INFO list.
-            ALLOC_INFO
-                .as_mut()
-                .unwrap()
-                .insert(ptr as usize, new_size, false);
-        } else {
-            // In all other cases, the memory block is resized and a new ptr
-            // is returned. This may differ from the original ptr if the new
-            // block is too large to fit in the same space as the old block
-            ALLOC_INFO
-                .as_mut()
-                .unwrap()
-                .update(ptr as usize, new_ptr as usize, new_size);
-        }
-        ALLOC_LOCK.unlock();
+        assert!(!ptr.is_null());
+        assert!(new_size > 0);
+
+        AllocMetadata::update(ptr as usize, new_ptr as usize, new_size);
         new_ptr
     }
 }
@@ -88,15 +61,12 @@ pub struct GCMalloc;
 unsafe impl Alloc for GCMalloc {
     unsafe fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocErr> {
         let ptr = libc::malloc(layout.size() as libc::size_t) as *mut u8;
-
         Ok(NonNull::new_unchecked(ptr))
     }
 
     unsafe fn dealloc(&mut self, ptr: NonNull<u8>, _layout: Layout) {
         libc::free(ptr.as_ptr() as *mut libc::c_void);
-        ALLOC_LOCK.lock();
-        ALLOC_INFO.as_mut().unwrap().remove(ptr.as_ptr() as usize);
-        ALLOC_LOCK.unlock();
+        AllocMetadata::remove(ptr.as_ptr() as usize);
     }
 
     unsafe fn realloc(
@@ -107,12 +77,10 @@ unsafe impl Alloc for GCMalloc {
     ) -> Result<NonNull<u8>, AllocErr> {
         let new_ptr = libc::realloc(ptr.as_ptr() as *mut libc::c_void, new_size) as *mut u8;
 
-        ALLOC_LOCK.lock();
-        ALLOC_INFO
-            .as_mut()
-            .unwrap()
-            .update(ptr.as_ptr() as usize, new_ptr as usize, new_size);
-        ALLOC_LOCK.unlock();
+        assert!(!ptr.as_ptr().is_null());
+        assert!(new_size > 0);
+
+        AllocMetadata::update(ptr.as_ptr() as usize, new_ptr as usize, new_size);
         Ok(NonNull::new_unchecked(new_ptr))
     }
 }
@@ -377,7 +345,7 @@ impl AllocMetadata {
         ALLOC_LOCK.lock();
         unsafe {
             match ALLOC_INFO {
-                Some(ref mut pm) => pm.insert(ptr as usize, size, true),
+                Some(ref mut pm) => pm.insert(ptr as usize, size, gc),
                 None => {
                     let mut al = AllocList::new();
                     al.insert(ptr as usize, size, gc);
@@ -396,16 +364,18 @@ impl AllocMetadata {
         ptr_info
     }
 
+    /// Updates the metadata associated with an allocation so that the block
+    /// once pointed to by `ptr` is recorded as having moved to `new_ptr` and is
+    /// now `size` bytes big.
+    pub(crate) fn update(ptr: usize, new_ptr: usize, size: usize) {
+        ALLOC_LOCK.lock();
+        unsafe { ALLOC_INFO.as_mut().unwrap().update(ptr, new_ptr, size) };
+        ALLOC_LOCK.unlock();
+    }
+
     /// Removes the metadata associated with an allocation.
-    #[cfg(test)]
     pub(crate) fn remove(ptr: usize) {
         ALLOC_LOCK.lock();
-
-        debug_assert!(|| -> bool {
-            let ptr_info = unsafe { ALLOC_INFO.as_ref().unwrap().find_base(ptr).unwrap() };
-            ptr_info.gc
-        }());
-
         unsafe { ALLOC_INFO.as_mut().unwrap().remove(ptr) };
         ALLOC_LOCK.unlock();
     }
@@ -415,49 +385,67 @@ impl AllocMetadata {
 mod tests {
     use super::*;
 
+    static mut NEXT_PTR: usize = 1;
+    static mut PTR_LOCK: AllocLock = AllocLock::new();
+
+    fn unique_ptr(size: usize) -> usize {
+        unsafe {
+            PTR_LOCK.lock();
+            let ptr = NEXT_PTR;
+            NEXT_PTR += size + 1;
+            PTR_LOCK.unlock();
+            ptr
+        }
+    }
+
     #[test]
     fn insert_and_find_ptr() {
-        let mut al = AllocList::new();
-        let pm = PtrInfo {
-            ptr: 1234,
-            size: 4,
+        let size = 4;
+        let pi = PtrInfo {
+            ptr: unique_ptr(size),
+            size,
             gc: false,
         };
-        al.insert(pm.ptr, pm.size, pm.gc);
 
-        assert_eq!(al.find_base(pm.ptr).unwrap(), pm)
+        AllocMetadata::insert(pi.ptr, pi.size, pi.gc);
+        assert_eq!(AllocMetadata::find(pi.ptr).unwrap(), pi)
     }
 
     #[test]
     fn find_inner_ptr() {
-        let mut al = AllocList::new();
-        let pm = PtrInfo {
-            ptr: 1234,
-            size: 4,
+        let size = 2;
+        let pi = PtrInfo {
+            ptr: unique_ptr(size),
+            size,
             gc: false,
         };
+        AllocMetadata::insert(pi.ptr, pi.size, pi.gc);
 
-        al.insert(pm.ptr, pm.size, pm.gc);
+        for i in 0..size {
+            assert_eq!(AllocMetadata::find(pi.ptr + i).unwrap(), pi);
+        }
 
-        assert_eq!(al.find_base(1235).unwrap(), pm);
-        assert_eq!(al.find_base(1236).unwrap(), pm);
-        assert_eq!(al.find_base(1237).unwrap(), pm);
-        assert!(al.find_base(1238).is_none());
+        // Check for off-by-one
+        match AllocMetadata::find(pi.ptr + size + 1) {
+            Some(pi_actual) => assert_ne!(pi_actual, pi),
+            None => (),
+        }
     }
 
     #[test]
     fn free_block() {
-        let mut al = AllocList::new();
-        let pm = PtrInfo {
-            ptr: 1234,
-            size: 4,
+        let size = 2;
+        let pi = PtrInfo {
+            ptr: unique_ptr(size),
+            size,
             gc: false,
         };
-        al.insert(pm.ptr, pm.size, pm.gc);
 
-        al.remove(pm.ptr);
+        AllocMetadata::insert(pi.ptr, pi.size, pi.gc);
+        assert!(AllocMetadata::find(pi.ptr).is_some());
+        AllocMetadata::remove(pi.ptr);
 
-        assert!(al.find_base(1234).is_none());
+        assert!(AllocMetadata::find(pi.ptr).is_none());
     }
 
     #[test]
@@ -483,14 +471,15 @@ mod tests {
 
     #[test]
     fn record_gc_alloc() {
-        let mut al = AllocList::new();
-        let pm = PtrInfo {
-            ptr: 1234,
-            size: 4,
+        let size = 2;
+        let pi = PtrInfo {
+            ptr: unique_ptr(size),
+            size,
             gc: true,
         };
-        al.insert(pm.ptr, pm.size, pm.gc);
 
-        assert!(al.find_base(1234).unwrap().gc);
+        AllocMetadata::insert(pi.ptr, pi.size, pi.gc);
+
+        assert!(AllocMetadata::find(pi.ptr).unwrap().gc);
     }
 }
