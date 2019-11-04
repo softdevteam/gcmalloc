@@ -386,49 +386,67 @@ impl AllocMetadata {
 mod tests {
     use super::*;
 
+    static mut NEXT_PTR: usize = 1;
+    static mut PTR_LOCK: AllocLock = AllocLock::new();
+
+    fn unique_ptr(size: usize) -> usize {
+        unsafe {
+            PTR_LOCK.lock();
+            let ptr = NEXT_PTR;
+            NEXT_PTR += size + 1;
+            PTR_LOCK.unlock();
+            ptr
+        }
+    }
+
     #[test]
     fn insert_and_find_ptr() {
-        let mut al = AllocList::new();
-        let pm = PtrInfo {
-            ptr: 1234,
-            size: 4,
+        let size = 4;
+        let pi = PtrInfo {
+            ptr: unique_ptr(size),
+            size,
             gc: false,
         };
-        al.insert(pm.ptr, pm.size, pm.gc);
 
-        assert_eq!(al.find_base(pm.ptr).unwrap(), pm)
+        AllocMetadata::insert(pi.ptr, pi.size, pi.gc);
+        assert_eq!(AllocMetadata::find(pi.ptr).unwrap(), pi)
     }
 
     #[test]
     fn find_inner_ptr() {
-        let mut al = AllocList::new();
-        let pm = PtrInfo {
-            ptr: 1234,
-            size: 4,
+        let size = 2;
+        let pi = PtrInfo {
+            ptr: unique_ptr(size),
+            size,
             gc: false,
         };
+        AllocMetadata::insert(pi.ptr, pi.size, pi.gc);
 
-        al.insert(pm.ptr, pm.size, pm.gc);
+        for i in 0..size {
+            assert_eq!(AllocMetadata::find(pi.ptr + i).unwrap(), pi);
+        }
 
-        assert_eq!(al.find_base(1235).unwrap(), pm);
-        assert_eq!(al.find_base(1236).unwrap(), pm);
-        assert_eq!(al.find_base(1237).unwrap(), pm);
-        assert!(al.find_base(1238).is_none());
+        // Check for off-by-one
+        match AllocMetadata::find(pi.ptr + size + 1) {
+            Some(pi_actual) => assert_ne!(pi_actual, pi),
+            None => (),
+        }
     }
 
     #[test]
     fn free_block() {
-        let mut al = AllocList::new();
-        let pm = PtrInfo {
-            ptr: 1234,
-            size: 4,
+        let size = 2;
+        let pi = PtrInfo {
+            ptr: unique_ptr(size),
+            size,
             gc: false,
         };
-        al.insert(pm.ptr, pm.size, pm.gc);
 
-        al.remove(pm.ptr);
+        AllocMetadata::insert(pi.ptr, pi.size, pi.gc);
+        assert!(AllocMetadata::find(pi.ptr).is_some());
+        AllocMetadata::remove(pi.ptr);
 
-        assert!(al.find_base(1234).is_none());
+        assert!(AllocMetadata::find(pi.ptr).is_none());
     }
 
     #[test]
@@ -454,14 +472,15 @@ mod tests {
 
     #[test]
     fn record_gc_alloc() {
-        let mut al = AllocList::new();
-        let pm = PtrInfo {
-            ptr: 1234,
-            size: 4,
+        let size = 2;
+        let pi = PtrInfo {
+            ptr: unique_ptr(size),
+            size,
             gc: true,
         };
-        al.insert(pm.ptr, pm.size, pm.gc);
 
-        assert!(al.find_base(1234).unwrap().gc);
+        AllocMetadata::insert(pi.ptr, pi.size, pi.gc);
+
+        assert!(AllocMetadata::find(pi.ptr).unwrap().gc);
     }
 }
