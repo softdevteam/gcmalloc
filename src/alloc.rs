@@ -24,9 +24,8 @@ static mut ALLOC_INFO: Option<AllocList> = None;
 /// metadata about each allocation to shared memory upon returning from the
 /// system allocator call. This requires additional synchronisation mechanisms.
 /// It is not possible to use `sys::Sync::Mutex` for this purpose as the
-/// implementation includes a heap allocation containing a `pthread_mutex`. This
-/// would cause infinite recursion when initialising the lock as the allocator
-/// would call itself.
+/// implementation includes a heap allocation containing a `pthread_mutex`.
+/// Since `alloc` and friends are not re-entrant, it's not possible to use this.
 ///
 /// Instead, we use a simple global spinlock built on an atomic bool to guard
 /// access to the ALLOC_INFO list.
