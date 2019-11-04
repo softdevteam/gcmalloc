@@ -9,6 +9,7 @@
 
 use std::{
     alloc::{Alloc, AllocErr, GlobalAlloc, Layout},
+    mem::size_of,
     ptr::NonNull,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -124,7 +125,7 @@ impl AllocLock {
     }
 
     fn lock(&self) {
-        while !self.0.compare_and_swap(false, true, Ordering::AcqRel) {
+        while self.0.compare_and_swap(false, true, Ordering::AcqRel) {
             // Spin
         }
     }
@@ -167,11 +168,17 @@ impl<'a> Iterator for AllocListIterMut<'a> {
         // It's UB to call `.add` on a pointer past its allocation bounds, so we
         // need to check that it's within range before turning it into a pointer
         // and dereferencing it
-        if self.idx * core::mem::size_of::<Block>() >= SIZE_ALLOC_INFO {
+        if self.idx * size_of::<Block>() >= (SIZE_ALLOC_INFO - size_of::<Block>()) {
             return None;
         }
 
-        let ptr = self.alloc_list.start as usize + (self.idx * core::mem::size_of::<Block>());
+        // If we're still doing bump insertion, then there's a chunk of the list
+        // which remains uninitialized.
+        if self.alloc_list.can_bump && self.idx >= self.alloc_list.next_free {
+            return None;
+        }
+
+        let ptr = self.alloc_list.start as usize + (self.idx * size_of::<Block>());
         self.idx += 1;
 
         unsafe { Some(&mut *(ptr as *mut Block)) }
@@ -184,11 +191,17 @@ impl<'a> Iterator for AllocListIter<'a> {
     fn next(&mut self) -> Option<&'a Block> {
         // It's UB to call `.add` on a pointer past its allocation bounds, so we
         // need to check that it's within range before turning it into a pointer
-        if self.idx * core::mem::size_of::<Block>() >= SIZE_ALLOC_INFO {
+        if self.idx * size_of::<Block>() >= SIZE_ALLOC_INFO {
             return None;
         }
 
-        let ptr = self.alloc_list.start as usize + (self.idx * core::mem::size_of::<Block>());
+        // If we're still doing bump insertion, then there's a chunk of the list
+        // which remains uninitialized.
+        if self.alloc_list.can_bump && self.idx >= self.alloc_list.next_free {
+            return None;
+        }
+
+        let ptr = self.alloc_list.start as usize + (self.idx * size_of::<Block>());
         self.idx += 1;
 
         let entry = unsafe { &*(ptr as *const Block) };
@@ -230,7 +243,8 @@ impl AllocList {
         if self.can_bump {
             unsafe {
                 let next_ptr = self.start.add(self.next_free) as *mut Block;
-                if (next_ptr as usize) < self.start as usize + SIZE_ALLOC_INFO {
+                let last = self.start as usize + SIZE_ALLOC_INFO - size_of::<Block>();
+                if (next_ptr as usize) <= last {
                     *next_ptr = Block::Entry(core::num::NonZeroUsize::new_unchecked(ptr), size, gc);
                     self.next_free += 1;
                     return;
@@ -254,7 +268,7 @@ impl AllocList {
         }
 
         // The allocation list is full
-        exit_alloc("Allocation failed: Metadata list full");
+        exit_alloc("Allocation failed: Metadata list full\n");
     }
 
     /// Remove ptr information associated with a base pointer (perfomed on a
@@ -341,7 +355,7 @@ pub struct PtrInfo {
 
 fn exit_alloc(msg: &str) {
     unsafe { libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len()) };
-    std::process::exit(1);
+    std::process::abort();
 }
 
 // -----------------------------------------------------------------------------
@@ -383,6 +397,7 @@ impl AllocMetadata {
     }
 
     /// Removes the metadata associated with an allocation.
+    #[cfg(test)]
     pub(crate) fn remove(ptr: usize) {
         ALLOC_LOCK.lock();
 

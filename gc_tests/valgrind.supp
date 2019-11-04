@@ -1,0 +1,7 @@
+{
+   <uninitialized_stack>
+   Memcheck:Cond
+   ...
+   fun:scan_stack
+}
+
