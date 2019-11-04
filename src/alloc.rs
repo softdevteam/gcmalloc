@@ -168,7 +168,7 @@ impl<'a> Iterator for AllocListIterMut<'a> {
         // It's UB to call `.add` on a pointer past its allocation bounds, so we
         // need to check that it's within range before turning it into a pointer
         // and dereferencing it
-        if self.idx * core::mem::size_of::<Block>() >= SIZE_ALLOC_INFO {
+        if self.idx * size_of::<Block>() >= (SIZE_ALLOC_INFO - size_of::<Block>()) {
             return None;
         }
 
