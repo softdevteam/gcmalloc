@@ -9,9 +9,9 @@
 
 use std::{
     alloc::{Alloc, AllocErr, GlobalAlloc, Layout},
+    mem::size_of,
     ptr::NonNull,
     sync::atomic::{AtomicBool, Ordering},
-    mem::size_of,
 };
 
 static SIZE_ALLOC_INFO: usize = (1024 * 1024) * 2; // 2MiB
@@ -178,7 +178,7 @@ impl<'a> Iterator for AllocListIterMut<'a> {
             return None;
         }
 
-        let ptr = self.alloc_list.start as usize + (self.idx * core::mem::size_of::<Block>());
+        let ptr = self.alloc_list.start as usize + (self.idx * size_of::<Block>());
         self.idx += 1;
 
         unsafe { Some(&mut *(ptr as *mut Block)) }
@@ -191,7 +191,7 @@ impl<'a> Iterator for AllocListIter<'a> {
     fn next(&mut self) -> Option<&'a Block> {
         // It's UB to call `.add` on a pointer past its allocation bounds, so we
         // need to check that it's within range before turning it into a pointer
-        if self.idx * core::mem::size_of::<Block>() >= SIZE_ALLOC_INFO {
+        if self.idx * size_of::<Block>() >= SIZE_ALLOC_INFO {
             return None;
         }
 
@@ -201,7 +201,7 @@ impl<'a> Iterator for AllocListIter<'a> {
             return None;
         }
 
-        let ptr = self.alloc_list.start as usize + (self.idx * core::mem::size_of::<Block>());
+        let ptr = self.alloc_list.start as usize + (self.idx * size_of::<Block>());
         self.idx += 1;
 
         let entry = unsafe { &*(ptr as *const Block) };
