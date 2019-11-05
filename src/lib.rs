@@ -40,6 +40,7 @@ static mut GC_ALLOCATOR: GCMalloc = GCMalloc;
 
 static mut COLLECTOR: Option<Collector> = None;
 
+#[derive(Debug)]
 pub struct Gc<T> {
     objptr: *mut T,
 }
@@ -77,6 +78,9 @@ impl<T> Gc<T> {
         }
     }
 
+    pub(crate) fn base_ptr_offset(&self) -> usize {
+        self.header().0.get() & !1
+    }
 
     pub(crate) fn mark_bit(&self) -> bool {
         self.header().mark_bit()
@@ -110,16 +114,16 @@ impl<T> Gc<T> {
             AllocMetadata::insert(objptr as usize, objsize, true);
 
             let headerptr = objptr.sub(size_of::<usize>());
-            ptr::write(headerptr as *mut GcHeader, GcHeader::new());
+            ptr::write(headerptr as *mut GcHeader, GcHeader::new(uoff));
             objptr as *mut T
         }
     }
 }
 
 impl GcHeader {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(uoff: usize) -> Self {
         let white = unsafe { !COLLECTOR.as_ref().unwrap().current_black() };
-        let header = Self(Cell::new(0));
+        let header = Self(Cell::new(uoff));
         header.set_mark_bit(white);
         header
     }
@@ -189,7 +193,9 @@ impl Debug {
         // marking has taken place. After a full collection has happened,
         // marking results are stale and the object graph must be re-marked in
         // order for this query to be meaningful.
-        assert_eq!(cstate, gc::CollectorState::FinishedMarking);
+        assert!(!collector.debug_flags.sweep_phase);
+        assert_eq!(cstate, gc::CollectorState::Ready);
+
         return collector.colour(unsafe { Gc::from_raw(gc.objptr as *const i8) })
             == gc::Colour::Black;
     }

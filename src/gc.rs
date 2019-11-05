@@ -9,9 +9,13 @@
 
 use crate::{
     alloc::{AllocMetadata, PtrInfo},
-    Gc,
+    Gc, GC_ALLOCATOR,
 };
-use std::sync::Mutex;
+use std::{
+    alloc::{Alloc, Layout},
+    ptr::NonNull,
+    sync::Mutex,
+};
 
 static WORD_SIZE: usize = std::mem::size_of::<usize>(); // Bytes
 
@@ -32,8 +36,9 @@ extern "sysv64" {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum CollectorState {
     Ready,
+    RootScanning,
     Marking,
-    FinishedMarking,
+    Sweeping,
 }
 
 pub struct DebugFlags {
@@ -43,7 +48,10 @@ pub struct DebugFlags {
 
 impl DebugFlags {
     pub fn new() -> Self {
-        Self { mark_phase: true, sweep_phase: true }
+        Self {
+            mark_phase: true,
+            sweep_phase: true,
+        }
     }
 
     pub fn mark_phase(mut self, val: bool) -> Self {
@@ -91,7 +99,7 @@ impl Collector {
         {
             let mut cstate = self.state.lock().unwrap();
             match *cstate {
-                CollectorState::Ready => *cstate = CollectorState::Marking,
+                CollectorState::Ready => *cstate = CollectorState::RootScanning,
                 _ => {
                     // The collector is running on another thread.
                     return;
@@ -105,20 +113,13 @@ impl Collector {
 
         if self.debug_flags.mark_phase {
             self.enter_mark_phase();
-            *self.state.lock().unwrap() = CollectorState::FinishedMarking;
         }
 
-        if !self.debug_flags.sweep_phase {
-            return;
+        if self.debug_flags.sweep_phase {
+            self.enter_sweep_phase();
         }
 
-        // Flip the meaning of the mark bit, i.e. if false == Black, then it
-        // becomes false == white. This is a simplification which allows us to
-        // avoid resetting the mark bit for every survived object after
-        // collection. Since we do not implement a marking bitmap and instead
-        // store this mark bit in each object header, this would be a very
-        // expensive operation.
-        self.black = !self.black;
+        *self.state.lock().unwrap() = CollectorState::Ready;
     }
 
     /// The worklist is populated with potential GC roots during the stack
@@ -127,6 +128,8 @@ impl Collector {
     /// indicate that it is reachable by the mutator, and is therefore *not* a
     /// candidate for reclaimation.
     fn enter_mark_phase(&mut self) {
+        *self.state.lock().unwrap() = CollectorState::Marking;
+
         while !self.worklist.is_empty() {
             let PtrInfo { ptr, size, gc } = self.worklist.pop().unwrap();
 
@@ -152,6 +155,31 @@ impl Collector {
                 }
             }
         }
+    }
+
+    fn enter_sweep_phase(&mut self) {
+        *self.state.lock().unwrap() = CollectorState::Sweeping;
+
+        for PtrInfo { ptr, .. } in AllocMetadata.iter().filter(|x| x.gc) {
+            let obj = unsafe { Gc::from_raw(ptr as *const i8) };
+            if self.colour(obj) == Colour::White {
+                unsafe {
+                    let baseptr = (ptr as *mut u8).sub(obj.base_ptr_offset());
+                    GC_ALLOCATOR.dealloc(
+                        NonNull::new_unchecked(baseptr as *mut u8),
+                        Layout::new::<usize>(),
+                    );
+                }
+            }
+        }
+
+        // Flip the meaning of the mark bit, i.e. if false == Black, then it
+        // becomes false == white. This is a simplification which allows us to
+        // avoid resetting the mark bit for every survived object after
+        // collection. Since we do not implement a marking bitmap and instead
+        // store this mark bit in each object header, this would be a very
+        // expensive operation.
+        self.black = !self.black;
     }
 
     #[no_mangle]

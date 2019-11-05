@@ -379,6 +379,36 @@ impl AllocMetadata {
         unsafe { ALLOC_INFO.as_mut().unwrap().remove(ptr) };
         ALLOC_LOCK.unlock();
     }
+
+    pub(crate) fn iter(&self) -> AllocMetadataIter {
+        AllocMetadataIter {
+            alloc_list: unsafe { ALLOC_INFO.as_ref().unwrap().iter() },
+        }
+    }
+}
+
+pub(crate) struct AllocMetadataIter<'a> {
+    alloc_list: AllocListIter<'a>,
+}
+
+impl<'a> Iterator for AllocMetadataIter<'a> {
+    type Item = PtrInfo;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let block = match self.alloc_list.next() {
+            Some(block) => block,
+            None => return None,
+        };
+
+        match *block {
+            Block::Entry(ptr, size, gc) => Some(PtrInfo {
+                ptr: ptr.get(),
+                size,
+                gc,
+            }),
+            Block::Free => None,
+        }
+    }
 }
 
 #[cfg(test)]
