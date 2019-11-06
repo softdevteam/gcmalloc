@@ -25,6 +25,7 @@ use crate::{
 };
 use std::{
     alloc::{Alloc, Layout},
+    cell::Cell,
     mem::{forget, size_of},
     ops::{Deref, DerefMut},
     ptr,
@@ -43,8 +44,8 @@ pub struct Gc<T> {
     objptr: *mut T,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct GcHeader(usize);
+#[derive(Debug)]
+struct GcHeader(Cell<usize>);
 
 impl<T> Gc<T> {
     pub fn new(v: T) -> Self {
@@ -69,18 +70,20 @@ impl<T> Gc<T> {
         self.objptr
     }
 
-    pub(crate) fn header(&self) -> &GcHeader {
+    fn header(&self) -> &GcHeader {
         unsafe {
             let hoff = (self.objptr as *const i8).sub(size_of::<GcHeader>());
             &*(hoff as *const GcHeader)
         }
     }
 
-    pub(crate) fn header_mut(&self) -> &mut GcHeader {
-        unsafe {
-            let hoff = (self.objptr as *const i8).sub(size_of::<GcHeader>());
-            &mut *(hoff as *mut GcHeader)
-        }
+
+    pub(crate) fn mark_bit(&self) -> bool {
+        self.header().mark_bit()
+    }
+
+    pub(crate) fn set_mark_bit(&self, value: bool) {
+        self.header().set_mark_bit(value)
     }
 
     /// Allocate memory sufficient to `l` (i.e. correctly aligned and of at
@@ -116,20 +119,20 @@ impl<T> Gc<T> {
 impl GcHeader {
     pub(crate) fn new() -> Self {
         let white = unsafe { !COLLECTOR.as_ref().unwrap().current_black() };
-        let mut header = Self(0);
+        let header = Self(Cell::new(0));
         header.set_mark_bit(white);
         header
     }
 
     pub(crate) fn mark_bit(&self) -> bool {
-        (self.0 & 1) == 1
+        (self.0.get() & 1) == 1
     }
 
-    pub(crate) fn set_mark_bit(&mut self, mark: bool) {
+    pub(crate) fn set_mark_bit(&self, mark: bool) {
         if mark {
-            self.0 |= 1
+            self.0.set(self.0.get() | 1);
         } else {
-            self.0 &= !1
+            self.0.set(self.0.get() & !1);
         }
     }
 }

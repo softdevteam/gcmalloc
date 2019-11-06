@@ -167,7 +167,7 @@ impl Collector {
     }
 
     pub(crate) fn colour(&self, obj: Gc<i8>) -> Colour {
-        if obj.header().mark_bit() == self.black {
+        if obj.mark_bit() == self.black {
             Colour::Black
         } else {
             Colour::White
@@ -176,8 +176,8 @@ impl Collector {
 
     fn mark(&self, obj: Gc<i8>, colour: Colour) {
         match colour {
-            Colour::Black => obj.header_mut().set_mark_bit(self.black),
-            Colour::White => obj.header_mut().set_mark_bit(!self.black),
+            Colour::Black => obj.set_mark_bit(self.black),
+            Colour::White => obj.set_mark_bit(!self.black),
         };
     }
 }
