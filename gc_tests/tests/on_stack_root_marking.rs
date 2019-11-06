@@ -12,7 +12,7 @@ fn foo() {
 }
 
 fn main() {
-    gcmalloc::init(DebugFlags::new().mark_only());
+    gcmalloc::init(DebugFlags::new().sweep_phase(false));
 
     let x = Gc::new(123 as usize);
     foo(); // triggers a collection

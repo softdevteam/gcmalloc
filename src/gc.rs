@@ -37,19 +37,22 @@ pub(crate) enum CollectorState {
 }
 
 pub struct DebugFlags {
-    mark_only: bool,
+    pub mark_phase: bool,
+    pub sweep_phase: bool,
 }
 
 impl DebugFlags {
     pub fn new() -> Self {
-        Self { mark_only: false }
+        Self { mark_phase: true, sweep_phase: true }
     }
 
-    /// Prevents the GC from reclaiming 'garbage' objects. This flag is useful
-    /// for debugging whether the collector was able to find an object(s) while
-    /// traversing the object graph.
-    pub fn mark_only(mut self) -> Self {
-        self.mark_only = true;
+    pub fn mark_phase(mut self, val: bool) -> Self {
+        self.mark_phase = val;
+        self
+    }
+
+    pub fn sweep_phase(mut self, val: bool) -> Self {
+        self.sweep_phase = val;
         self
     }
 }
@@ -65,7 +68,7 @@ pub(crate) enum Colour {
 pub(crate) struct Collector {
     worklist: Vec<PtrInfo>,
     black: bool,
-    debug_flags: DebugFlags,
+    pub(crate) debug_flags: DebugFlags,
     pub(crate) state: Mutex<CollectorState>,
 }
 
@@ -100,11 +103,12 @@ impl Collector {
         // an assembly stub. The fn to scan the stack is passed as a callback
         unsafe { spill_registers(self as *mut Collector as *mut u8, Collector::scan_stack) }
 
-        self.enter_mark_phase();
+        if self.debug_flags.mark_phase {
+            self.enter_mark_phase();
+            *self.state.lock().unwrap() = CollectorState::FinishedMarking;
+        }
 
-        *self.state.lock().unwrap() = CollectorState::FinishedMarking;
-
-        if self.debug_flags.mark_only {
+        if !self.debug_flags.sweep_phase {
             return;
         }
 
