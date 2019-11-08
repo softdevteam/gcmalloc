@@ -40,15 +40,56 @@ static mut GC_ALLOCATOR: GCMalloc = GCMalloc;
 
 static mut COLLECTOR: Option<Collector> = None;
 
+/// A garbage collected pointer. 'Gc' stands for 'Garbage collected'.
+///
+/// The type `Gc<T>` provides shared ownership of a value of type `T`,
+/// allocted in the heap. `Gc` pointers are `Copyable`, so new pointers to
+/// the same value in the heap can be produced trivially. The lifetime of
+/// `T` is tracked automatically: it is freed when the application
+/// determines that no references to `T` are in scope. This does not happen
+/// deterministically, and no guarantees are given about when a value
+/// managed by `Gc` is freed.
+///
+/// Shared references in Rust disallow mutation by default, and `Gc` is no
+/// exception: you cannot generally obtain a mutable reference to something
+/// inside an `Gc`. If you need mutability, put a `Cell` or `RefCell` inside
+/// the `Gc`.
+///
+/// Unlike `Rc<T>`, cycles between `Gc` pointers are allowed and can be
+/// deallocated without issue.
+///
+/// `Gc<T>` automatically dereferences to `T` (via the `Deref` trait), so
+/// you can call `T`'s methods on a value of type `Gc<T>`.
+///
+/// `Gc<T>` is implemented using a tracing mark-sweep garbage collection
+/// algorithm. This means that by using `Gc` pointers in a Rust application,
+/// you pull in the overhead of a run-time garbage collector to manage and
+/// free `Gc` values behind the scenes.
 #[derive(Debug)]
 pub struct Gc<T> {
     objptr: *mut T,
 }
 
+/// A garbage collected value is stored with a 1 machine word sized header. This
+/// header stores important metadata used by the GC during collection. It should
+/// never be accessible to users of the GC library.
+///
+/// The metadata inside the header contains the mark-bit used by the collector
+/// to determine the value's reachability. It also contains the offset from the
+/// `objptr` to the `baseptr` in machine words. For example, if this value was
+/// 8, then the `baseptr` is, on a 64-bit machine, 64 bytes before the `objptr`.
+/// This is required in instances where a greater-than-usize alignment is used
+/// to store `T`, as `dealloc` requires the allocation block's `baseptr`, *not*
+/// the `objptr`. This will only work on alignments small enough to fit in 63
+/// bits. The bitpattern of this is as follows:
+///
+/// 0:       mark-bit
+/// 1..63:   offset in words to baseptr
 #[derive(Debug)]
 struct GcHeader(Cell<usize>);
 
 impl<T> Gc<T> {
+    /// Constructs a new `Gc<T>`.
     pub fn new(v: T) -> Self {
         let objptr = Self::alloc_blank(Layout::new::<T>());
         let gc = unsafe {
@@ -67,10 +108,15 @@ impl<T> Gc<T> {
         }
     }
 
+    /// Get a raw pointer to the underlying value `T`.
     pub fn as_ptr(&self) -> *const T {
         self.objptr
     }
 
+    /// Returns a reference to the header of the `Gc<T>`. The header stores
+    /// meta-data about the value used by the collector. For example, the
+    /// mark-bit used to denote the object's reachability, is stored in
+    /// the header.
     fn header(&self) -> &GcHeader {
         unsafe {
             let hoff = (self.objptr as *const i8).sub(size_of::<GcHeader>());
@@ -82,6 +128,7 @@ impl<T> Gc<T> {
         self.header().0.get() & !1
     }
 
+    /// Get the value of the mark bit stored in the header of the `Gc<T>` value.
     pub(crate) fn mark_bit(&self) -> bool {
         self.header().mark_bit()
     }
@@ -166,14 +213,23 @@ impl<T> Clone for Gc<T> {
     }
 }
 
+/// Initialize the garbage collector. This *must* happen before any `Gc<T>`s are
+/// allocated.
 pub fn init(flags: gc::DebugFlags) {
     unsafe { COLLECTOR = Some(Collector::new(flags)) };
 }
 
+/// Perform a stop-the-world garbage collection. It is not recommended to call
+/// this manually and instead let the collector decide when a collection is
+/// necessary.
+///
+/// Calling `collect` when you believe that `Gc` managed values are no longer
+/// used is not guaranteed to free those values and should not be relied upon.
 pub fn collect() {
     unsafe { COLLECTOR.as_mut().unwrap().collect() }
 }
 
+/// Provides some useful functions for debugging and testing the collector.
 pub struct Debug;
 
 impl Debug {
