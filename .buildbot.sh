@@ -15,7 +15,3 @@ rustup component add --toolchain nightly rustfmt-preview || cargo +nightly insta
 cargo +nightly fmt --all -- --check
 
 cargo test
-
-# Run gc tests with sanitizers
-SANITIZERS="thread" cargo test --test gc_tests --target x86_64-unknown-linux-gnu
-VALGRIND="true" cargo test --test gc_tests --target x86_64-unknown-linux-gnu

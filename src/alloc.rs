@@ -107,7 +107,7 @@ impl AllocLock {
 /// allocated by the allocator. Any pointer can be queried during runtime to
 /// determine whether it points directly to, or inside an allocation block on
 /// the Rust heap.
-///     
+///
 /// The size of the allocation block is also recorded, so for each pointer into
 /// the heap the exact size of the allocation block can be known, allowing a
 /// conservative GC to know which additional machine words must be scanned.
@@ -309,15 +309,19 @@ enum Block {
     Entry(core::num::NonZeroUsize, usize, bool),
 }
 
-/// The metadata for each ptr is only 2 machine words which means that copying
-/// the data out of the `AllocList` is not that expensive. This is done so that
-/// the API is cleaner:
-///     * We abstract away the complexities of the underlying block structure
-///     * It is easier to work with primitives than references to primitives
+/// Information about an allocation block used by the collector.
+///
+/// This information is stored for every single allocation. It is vital for the
+/// collector to know things such as: determining whether an arbitrary word in a
+/// program is a ptr; how to get to the beginning of a block from some inner
+/// ptr; and whether a block is managed by the collector.
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub struct PtrInfo {
+    /// The pointer to the beginning of the allocation block.
     pub ptr: usize,
+    /// The size of the allocation block in bytes.
     pub size: usize,
+    /// Whether the allocation block is managed by the GC or Rust's RAII.
     pub gc: bool,
 }
 
@@ -378,6 +382,36 @@ impl AllocMetadata {
         ALLOC_LOCK.lock();
         unsafe { ALLOC_INFO.as_mut().unwrap().remove(ptr) };
         ALLOC_LOCK.unlock();
+    }
+
+    pub(crate) fn iter(&self) -> AllocMetadataIter {
+        AllocMetadataIter {
+            alloc_list: unsafe { ALLOC_INFO.as_ref().unwrap().iter() },
+        }
+    }
+}
+
+pub(crate) struct AllocMetadataIter<'a> {
+    alloc_list: AllocListIter<'a>,
+}
+
+impl<'a> Iterator for AllocMetadataIter<'a> {
+    type Item = PtrInfo;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let block = match self.alloc_list.next() {
+            Some(block) => block,
+            None => return None,
+        };
+
+        match *block {
+            Block::Entry(ptr, size, gc) => Some(PtrInfo {
+                ptr: ptr.get(),
+                size,
+                gc,
+            }),
+            Block::Free => None,
+        }
     }
 }
 
