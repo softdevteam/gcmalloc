@@ -6,6 +6,8 @@ edition = "2018"
 
 [dependencies]
 libc = "*"
+packed_struct = "0.3"
+packed_struct_codegen = "0.3"
 
 [build-dependencies]
 rerun_except = "0.1"

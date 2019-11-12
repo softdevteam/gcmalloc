@@ -251,7 +251,7 @@ impl Collector {
         }
     }
 
-    fn mark(&self, obj: Gc<i8>, colour: Colour) {
+    fn mark(&self, mut obj: Gc<i8>, colour: Colour) {
         match colour {
             Colour::Black => obj.set_mark_bit(self.black),
             Colour::White => obj.set_mark_bit(!self.black),

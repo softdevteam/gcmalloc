@@ -7,6 +7,12 @@
 #[cfg(not(all(target_pointer_width = "64", target_arch = "x86_64")))]
 compile_error!("Requires x86_64 with 64 bit pointer width.");
 
+extern crate packed_struct;
+#[macro_use]
+extern crate packed_struct_codegen;
+
+use packed_struct::prelude::*;
+
 pub mod alloc;
 pub mod gc;
 
@@ -21,6 +27,8 @@ use std::{
     ops::{Deref, DerefMut},
     ptr,
 };
+
+use packed_struct::PackedStruct;
 
 #[global_allocator]
 static ALLOCATOR: AllocWithInfo = AllocWithInfo;
@@ -61,24 +69,6 @@ pub struct Gc<T> {
     objptr: *mut T,
 }
 
-/// A garbage collected value is stored with a 1 machine word sized header. This
-/// header stores important metadata used by the GC during collection. It should
-/// never be accessible to users of the GC library.
-///
-/// The metadata inside the header contains the mark-bit used by the collector
-/// to determine the value's reachability. It also contains the offset from the
-/// `objptr` to the `baseptr` in machine words. For example, if this value was
-/// 8, then the `baseptr` is, on a 64-bit machine, 64 bytes before the `objptr`.
-/// This is required in instances where a greater-than-usize alignment is used
-/// to store `T`, as `dealloc` requires the allocation block's `baseptr`, *not*
-/// the `objptr`. This will only work on alignments small enough to fit in 63
-/// bits. The bitpattern of this is as follows:
-///
-/// 0:       mark-bit
-/// 1..63:   offset in words to baseptr
-#[derive(Debug)]
-struct GcHeader(Cell<usize>);
-
 impl<T> Gc<T> {
     /// Constructs a new `Gc<T>`.
     pub fn new(v: T) -> Self {
@@ -108,24 +98,34 @@ impl<T> Gc<T> {
     /// meta-data about the value used by the collector. For example, the
     /// mark-bit used to denote the object's reachability, is stored in
     /// the header.
-    fn header(&self) -> &GcHeader {
+    fn header(&self) -> GcHeader {
         unsafe {
-            let hoff = (self.objptr as *const i8).sub(size_of::<GcHeader>());
-            &*(hoff as *const GcHeader)
+            let hoff = (self.objptr as *const i8).sub(size_of::<usize>());
+            let raw = std::ptr::read(hoff as *mut [u8; 8]);
+            GcHeader::unpack(&raw).unwrap()
+        }
+    }
+
+    fn set_header(&mut self, header: GcHeader) {
+        unsafe {
+            let headerptr = (self.objptr as *const usize).sub(1) as *mut [u8; 8];
+            *headerptr = header.pack();
         }
     }
 
     pub(crate) fn base_ptr_offset(&self) -> usize {
-        self.header().0.get() & !1
+        *self.header().base_ptr_offset as usize
     }
 
     /// Get the value of the mark bit stored in the header of the `Gc<T>` value.
     pub(crate) fn mark_bit(&self) -> bool {
-        self.header().mark_bit()
+        self.header().mark_bit
     }
 
-    pub(crate) fn set_mark_bit(&self, value: bool) {
-        self.header().set_mark_bit(value)
+    pub(crate) fn set_mark_bit(&mut self, value: bool) {
+        let mut header = self.header();
+        header.mark_bit = value.into();
+        self.set_header(header);
     }
 
     /// Allocate memory sufficient to `l` (i.e. correctly aligned and of at
@@ -152,32 +152,47 @@ impl<T> Gc<T> {
             AllocMetadata::insert(objptr as usize, objsize, true);
 
             let headerptr = objptr.sub(size_of::<usize>());
-            ptr::write(headerptr as *mut GcHeader, GcHeader::new(uoff));
+            let header = GcHeader::new(uoff);
+            ptr::write(headerptr as *mut [u8; 8], GcHeader::pack(&header));
             objptr as *mut T
         }
     }
 }
 
+/// A garbage collected value is stored with a 1 machine word sized header. This
+/// header stores important metadata used by the GC during collection. It should
+/// never be accessible to users of the GC library.
+///
+/// The metadata inside the header contains the mark-bit used by the collector
+/// to determine the value's reachability. It also contains the offset from the
+/// `objptr` to the `baseptr` in machine words. For example, if this value was
+/// 8, then the `baseptr` is, on a 64-bit machine, 64 bytes before the `objptr`.
+/// This is required in instances where a greater-than-usize alignment is used
+/// to store `T`, as `dealloc` requires the allocation block's `baseptr`, *not*
+/// the `objptr`. This will only work on alignments small enough to fit in 63
+/// bits.
+#[derive(PackedStruct, Debug)]
+#[packed_struct(bit_numbering = "msb0", size_bytes = "8")]
+pub struct GcHeader {
+    /// The offset in words to the base pointer of `Gc<T>.
+    #[packed_field(bits = "0..=62", endian = "msb")]
+    base_ptr_offset: Integer<u64, packed_bits::Bits62>,
+    /// The pointer to the vtable for `Gc<T>`s `Trace` implementation.
+    /// Used by the GC during the marking phase
+    #[packed_field(bits = "63")]
+    mark_bit: bool,
+}
+
 impl GcHeader {
     pub(crate) fn new(uoff: usize) -> Self {
         let white = unsafe { !COLLECTOR.as_ref().unwrap().current_black() };
-        let header = Self(Cell::new(uoff));
-        header.set_mark_bit(white);
-        header
-    }
-
-    pub(crate) fn mark_bit(&self) -> bool {
-        (self.0.get() & 1) == 1
-    }
-
-    pub(crate) fn set_mark_bit(&self, mark: bool) {
-        if mark {
-            self.0.set(self.0.get() | 1);
-        } else {
-            self.0.set(self.0.get() & !1);
+        GcHeader {
+            base_ptr_offset: (uoff as u64).into(),
+            mark_bit: white,
         }
     }
 }
+
 
 impl<T> Deref for Gc<T> {
     type Target = T;
