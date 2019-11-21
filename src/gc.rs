@@ -1,9 +1,10 @@
 use crate::{
     alloc::{AllocMetadata, PtrInfo},
-    Gc, GC_ALLOCATOR,
+    Gc, Trace, GC_ALLOCATOR,
 };
 use std::{
     alloc::{Alloc, Layout},
+    mem::{align_of_val, size_of_val, transmute},
     ptr::NonNull,
     sync::Mutex,
 };
@@ -13,6 +14,11 @@ static WORD_SIZE: usize = std::mem::size_of::<usize>(); // in bytes
 type Address = usize;
 
 type Word = usize;
+
+/// Use this type when we do not care about the contents of a Gc. We choose `u8`
+/// because it maps similarly to how C / C++ use char when dealing with raw
+/// bytes.
+pub(crate) struct OpaqueU8(u8);
 
 type StackScanCallback = extern "sysv64" fn(&mut Collector, Address);
 #[link(name = "SpillRegisters", kind = "static")]
@@ -176,7 +182,7 @@ impl Collector {
                 // object's header. This means that unlike regular allocations,
                 // `ptr` will never point to the beginning of the allocation
                 // block.
-                let obj = unsafe { Gc::from_raw(ptr as *const i8) };
+                let obj = unsafe { Gc::from_raw(ptr as *const OpaqueU8) };
                 if self.colour(obj) == Colour::Black {
                     continue;
                 }
@@ -205,15 +211,9 @@ impl Collector {
         *self.state.lock().unwrap() = CollectorState::Sweeping;
 
         for PtrInfo { ptr, .. } in AllocMetadata.iter().filter(|x| x.gc) {
-            let obj = unsafe { Gc::from_raw(ptr as *const i8) };
+            let obj = unsafe { Gc::from_raw(ptr as *const OpaqueU8) };
             if self.colour(obj) == Colour::White {
-                unsafe {
-                    let baseptr = (ptr as *mut u8).sub(obj.base_ptr_offset());
-                    GC_ALLOCATOR.dealloc(
-                        NonNull::new_unchecked(baseptr as *mut u8),
-                        Layout::new::<usize>(),
-                    );
-                }
+                self.dealloc(obj);
             }
         }
 
@@ -224,6 +224,30 @@ impl Collector {
         // store this mark bit in each object header, this would be a very
         // expensive operation.
         self.black = !self.black;
+    }
+
+    /// Free the contents of a Gc<T>. It is deliberately not a monomorphised
+    /// because during collection, the concrete type of T is unknown. Instead,
+    /// an arbitrary placeholder type is used to represent the contents as the
+    /// actual type's size and alignment are dynamically fetched from the `Gc`s
+    /// vtable.
+    ///
+    /// A raw pointer to a known `Gc<T>` can be passed to this method by
+    /// creating a hollow `Gc<Placeholder>` struct with `Gc::from_raw`.
+    /// `Gc::new()` must *not* be used.
+    fn dealloc(&self, obj: Gc<OpaqueU8>) {
+        let to = unsafe {
+            transmute::<(usize, usize), &mut dyn Trace>((obj.objptr as usize, obj.vptr()))
+        };
+        let size = size_of_val(to);
+        let align = align_of_val(to);
+        let obj_layout = unsafe { Layout::from_size_align_unchecked(size, align) };
+        let (layout, uoff) = Layout::new::<usize>().extend(obj_layout).unwrap();
+        let baseptr = unsafe { (obj.objptr).sub(uoff) as *mut u8 };
+
+        unsafe {
+            GC_ALLOCATOR.dealloc(NonNull::new_unchecked(baseptr), layout);
+        }
     }
 
     /// Scans the stack from bottom to top, starting from the position of the
@@ -243,7 +267,7 @@ impl Collector {
         }
     }
 
-    pub(crate) fn colour(&self, obj: Gc<i8>) -> Colour {
+    pub(crate) fn colour(&self, obj: Gc<OpaqueU8>) -> Colour {
         if obj.mark_bit() == self.black {
             Colour::Black
         } else {
@@ -251,7 +275,7 @@ impl Collector {
         }
     }
 
-    fn mark(&self, obj: Gc<i8>, colour: Colour) {
+    fn mark(&self, mut obj: Gc<OpaqueU8>, colour: Colour) {
         match colour {
             Colour::Black => obj.set_mark_bit(self.black),
             Colour::White => obj.set_mark_bit(!self.black),

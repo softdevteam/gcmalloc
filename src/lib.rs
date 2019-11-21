@@ -7,6 +7,12 @@
 #[cfg(not(all(target_pointer_width = "64", target_arch = "x86_64")))]
 compile_error!("Requires x86_64 with 64 bit pointer width.");
 
+extern crate packed_struct;
+#[macro_use]
+extern crate packed_struct_codegen;
+
+use packed_struct::prelude::*;
+
 pub mod alloc;
 pub mod gc;
 
@@ -16,11 +22,12 @@ use crate::{
 };
 use std::{
     alloc::{Alloc, Layout},
-    cell::Cell,
-    mem::{forget, size_of},
+    mem::{forget, transmute},
     ops::{Deref, DerefMut},
     ptr,
 };
+
+use packed_struct::PackedStruct;
 
 #[global_allocator]
 static ALLOCATOR: AllocWithInfo = AllocWithInfo;
@@ -30,6 +37,27 @@ static ALLOCATOR: AllocWithInfo = AllocWithInfo;
 static mut GC_ALLOCATOR: GCMalloc = GCMalloc;
 
 static mut COLLECTOR: Option<Collector> = None;
+
+/// Used to specify how a value is traversed by a garbage collector.
+///
+/// In order for a value to be managed by the garbage collector, its type, `T`,
+/// must implement `Trace`. The `trace` method tells the garbage collector where
+/// to find `Gc` values reachable from `T`. Fields which reference `Gc` values
+/// -- either directly or indirectly -- are included in the `trace` method,
+/// which is then called by the garbage collector when marking objects.
+///
+/// TODO: This trait is only necessary for precise tracing of garbage collected
+/// objects. At the moment, is not used because all objects are conservatively
+/// scanned, word-by-word, looking for values which resemble pointers. However,
+/// we still implement `Trace` on all `Gc`s.
+///
+/// Since the goal is that garbage collected objects are eventually traced
+/// precisely using the trait-based `Trace` API, requiring this upfront serves
+/// as a useful placeholder so that we can use the trait-object based layout
+/// trick in the meantime.
+pub(crate) trait Trace {
+    fn trace(&self) {}
+}
 
 /// A garbage collected pointer. 'Gc' stands for 'Garbage collected'.
 ///
@@ -61,33 +89,21 @@ pub struct Gc<T> {
     objptr: *mut T,
 }
 
-/// A garbage collected value is stored with a 1 machine word sized header. This
-/// header stores important metadata used by the GC during collection. It should
-/// never be accessible to users of the GC library.
-///
-/// The metadata inside the header contains the mark-bit used by the collector
-/// to determine the value's reachability. It also contains the offset from the
-/// `objptr` to the `baseptr` in machine words. For example, if this value was
-/// 8, then the `baseptr` is, on a 64-bit machine, 64 bytes before the `objptr`.
-/// This is required in instances where a greater-than-usize alignment is used
-/// to store `T`, as `dealloc` requires the allocation block's `baseptr`, *not*
-/// the `objptr`. This will only work on alignments small enough to fit in 63
-/// bits. The bitpattern of this is as follows:
-///
-/// 0:       mark-bit
-/// 1..63:   offset in words to baseptr
-#[derive(Debug)]
-struct GcHeader(Cell<usize>);
-
 impl<T> Gc<T> {
     /// Constructs a new `Gc<T>`.
     pub fn new(v: T) -> Self {
         let objptr = Self::alloc_blank(Layout::new::<T>());
-        let gc = unsafe {
+        let mut gc = unsafe {
             objptr.copy_from_nonoverlapping(&v, 1);
             Gc::from_raw(objptr)
         };
+
         forget(v);
+
+        let to: &dyn Trace = &gc;
+        let vptr = unsafe { transmute::<*const dyn Trace, (usize, usize)>(to).1 };
+        gc.set_header(GcHeader::new(vptr));
+
         gc
     }
 
@@ -108,24 +124,34 @@ impl<T> Gc<T> {
     /// meta-data about the value used by the collector. For example, the
     /// mark-bit used to denote the object's reachability, is stored in
     /// the header.
-    fn header(&self) -> &GcHeader {
+    fn header(&self) -> GcHeader {
+        let raw_bytes = unsafe {
+            let headerptr = (self.objptr as *const usize).sub(1) as *mut [u8; 8];
+            std::ptr::read(headerptr)
+        };
+        GcHeader::unpack(&raw_bytes).unwrap()
+    }
+
+    fn set_header(&mut self, header: GcHeader) {
         unsafe {
-            let hoff = (self.objptr as *const i8).sub(size_of::<GcHeader>());
-            &*(hoff as *const GcHeader)
+            let headerptr = (self.objptr as *const usize).sub(1) as *mut [u8; 8];
+            ptr::write(headerptr, GcHeader::pack(&header));
         }
     }
 
-    pub(crate) fn base_ptr_offset(&self) -> usize {
-        self.header().0.get() & !1
+    pub(crate) fn vptr(&self) -> usize {
+        *self.header().trace_vptr as usize
     }
 
     /// Get the value of the mark bit stored in the header of the `Gc<T>` value.
     pub(crate) fn mark_bit(&self) -> bool {
-        self.header().mark_bit()
+        self.header().mark_bit
     }
 
-    pub(crate) fn set_mark_bit(&self, value: bool) {
-        self.header().set_mark_bit(value)
+    pub(crate) fn set_mark_bit(&mut self, value: bool) {
+        let mut header = self.header();
+        header.mark_bit = value.into();
+        self.set_header(header);
     }
 
     /// Allocate memory sufficient to `l` (i.e. correctly aligned and of at
@@ -150,31 +176,31 @@ impl<T> Gc<T> {
             // size excl. header and padding
             let objsize = layout.size() - (objptr as usize - baseptr as usize);
             AllocMetadata::insert(objptr as usize, objsize, true);
-
-            let headerptr = objptr.sub(size_of::<usize>());
-            ptr::write(headerptr as *mut GcHeader, GcHeader::new(uoff));
             objptr as *mut T
         }
     }
 }
 
+/// A garbage collected value is stored with a 1 machine word sized header. This
+/// header stores important metadata used by the GC during collection. It should
+/// never be accessible to users of the GC library.
+#[derive(PackedStruct, Debug)]
+#[packed_struct(bit_numbering = "msb0", size_bytes = "8")]
+pub struct GcHeader {
+    /// The pointer to the vtable for `Gc<T>`s `Trace` implementation.
+    #[packed_field(bits = "0..=62", endian = "msb")]
+    trace_vptr: Integer<u64, packed_bits::Bits62>,
+    /// Used by the GC during the marking phase
+    #[packed_field(bits = "63")]
+    mark_bit: bool,
+}
+
 impl GcHeader {
-    pub(crate) fn new(uoff: usize) -> Self {
+    pub(crate) fn new(vptr: usize) -> Self {
         let white = unsafe { !COLLECTOR.as_ref().unwrap().current_black() };
-        let header = Self(Cell::new(uoff));
-        header.set_mark_bit(white);
-        header
-    }
-
-    pub(crate) fn mark_bit(&self) -> bool {
-        (self.0.get() & 1) == 1
-    }
-
-    pub(crate) fn set_mark_bit(&self, mark: bool) {
-        if mark {
-            self.0.set(self.0.get() | 1);
-        } else {
-            self.0.set(self.0.get() & !1);
+        GcHeader {
+            trace_vptr: (vptr as u64).into(),
+            mark_bit: white,
         }
     }
 }
@@ -203,6 +229,8 @@ impl<T> Clone for Gc<T> {
         *self
     }
 }
+
+impl<T> Trace for Gc<T> {}
 
 /// Initialize the garbage collector. This *must* happen before any `Gc<T>`s are
 /// allocated.
@@ -243,7 +271,7 @@ impl Debug {
         assert!(!collector.debug_flags.sweep_phase);
         assert_eq!(cstate, gc::CollectorState::Ready);
 
-        return collector.colour(unsafe { Gc::from_raw(gc.objptr as *const i8) })
+        return collector.colour(unsafe { Gc::from_raw(gc.objptr as *const gc::OpaqueU8) })
             == gc::Colour::Black;
     }
 }
