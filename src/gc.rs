@@ -1,5 +1,5 @@
 use crate::{
-    alloc::{AllocMetadata, PtrInfo},
+    alloc::{AllocMetadata, PtrInfo, BLOCK_METADATA},
     Gc, Trace,
 };
 
@@ -210,8 +210,8 @@ impl Collector {
     fn enter_sweep_phase(&mut self) {
         *self.state.lock().unwrap() = CollectorState::Sweeping;
 
-        for PtrInfo { ptr, .. } in AllocMetadata.iter().filter(|x| x.gc) {
-            let obj = unsafe { Gc::from_raw(ptr as *const OpaqueU8) };
+        for block in unsafe { BLOCK_METADATA.iter().filter(|x| x.map_or(false, |x| x.gc)) } {
+            let obj = unsafe { Gc::from_raw(block.unwrap().ptr as *const OpaqueU8) };
             if self.colour(obj) == Colour::White {
                 self.dealloc(obj);
             }
