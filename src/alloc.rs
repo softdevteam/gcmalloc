@@ -1,3 +1,5 @@
+use stdalloc::raw_vec::RawVec;
+
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     mem::size_of,
@@ -62,6 +64,115 @@ impl AllocLock {
 
     fn unlock(&self) {
         self.0.store(false, Ordering::Release);
+    }
+}
+
+/// A VOH (Vector of Holes) is a contiguous growable array type optimised for
+/// fast insertion and O(1) removal.
+///
+/// Unlike the `Vec<T>` type available in the standard library, `VOH<T>`
+/// does not shift remaining elements to the left after removing an item.
+/// Instead, a `None` value is swapped in its place, effectively leaving a hole
+/// inside the vector.
+///
+/// Accessing elements in a `VOH<T>`, however, can be slower than a
+/// `Vec<T>`, as elements are no longer strictly contiguous; fragmentation will
+/// occur over time as removed elements increase the distance between those
+/// which remain.
+///
+/// The API to `VOH<T>` can be thought of as a heavily stripped down
+/// version of `Vec<T>`. Its use-case is highly specific, and intended only to
+/// be used internally as part of the Collector implementation. For this reason,
+/// its allocation is not tracked by the collector. Do not store any values
+/// inside which you intend the GC to keep alive.
+pub(crate) struct VOH<T> {
+    buf: RawVec<Option<T>, System>,
+    len: usize,
+}
+
+impl<T> VOH<T> {
+    #[inline]
+    pub const fn new() -> VOH<T> {
+        Self {
+            // use the system allocator instead of the global allocator
+            buf: RawVec::new_in(System),
+            len: 0,
+        }
+    }
+
+    /// Appends an element to the back of a collection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the number of elements in the vector overflows a `usize`.
+    pub fn push(&mut self, value: T) {
+        // This will panic or abort if we would allocate > isize::MAX bytes
+        // or if the length increment would overflow for zero-sized types.
+        if self.len == self.buf.capacity() {
+            self.reserve(1);
+        }
+        unsafe {
+            let end = self.as_mut_ptr().add(self.len);
+            ::std::ptr::write(end, Some(value));
+            self.len += 1;
+        }
+    }
+
+    /// Reserves capacity for at least `additional` more elements to be inserted
+    /// in the given `VOH<T>`. The collection may reserve more space to avoid
+    /// frequent reallocations. After calling `reserve`, capacity will be
+    /// greater than or equal to `self.len() + additional`. Does nothing if
+    /// capacity is already sufficient.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the new capacity overflows `usize`.
+    pub fn reserve(&mut self, additional: usize) {
+        self.buf.reserve(self.len, additional);
+    }
+
+    /// Removes and returns the element at position `index` within the vector if
+    /// it exists. Removal is O(1): the value at position `index` is simply
+    /// replaced with `None`. Since the vector does not shift all elements after
+    /// it to the left, removal does not decrease the length of the vector.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` is out of bounds.
+    pub fn remove(&mut self, index: usize) -> Option<T> {
+        assert!(index < self.len());
+        unsafe {
+            // the place we are taking from.
+            let ptr = self.as_mut_ptr().add(index);
+            // copy it out, unsafely having a copy of the value on
+            // the stack and in the vector at the same time.
+            let ret = ::std::ptr::read(ptr);
+
+            ::std::ptr::write(ptr, None);
+            ret
+        }
+    }
+}
+
+impl<T> ::std::ops::Deref for VOH<T> {
+    type Target = [Option<T>];
+
+    fn deref(&self) -> &Self::Target {
+        unsafe {
+            let p = self.buf.ptr();
+            ::core::intrinsics::assume(!p.is_null());
+            ::std::slice::from_raw_parts(p, self.len)
+        }
+    }
+}
+
+impl<T> ::std::ops::DerefMut for VOH<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe {
+            let p = self.buf.ptr();
+            ::core::intrinsics::assume(!p.is_null());
+            ::std::slice::from_raw_parts_mut(p, self.len)
+        }
     }
 }
 

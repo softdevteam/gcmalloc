@@ -3,9 +3,12 @@
 #![feature(core_intrinsics)]
 #![feature(allocator_api)]
 #![feature(alloc_layout_extra)]
-
+#![feature(raw_vec_internals)]
+#![feature(const_fn)]
 #[cfg(not(all(target_pointer_width = "64", target_arch = "x86_64")))]
 compile_error!("Requires x86_64 with 64 bit pointer width.");
+
+extern crate alloc as stdalloc;
 
 extern crate packed_struct;
 #[macro_use]
