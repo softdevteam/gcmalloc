@@ -1,5 +1,5 @@
 use std::{
-    alloc::{Alloc, AllocErr, GlobalAlloc, Layout},
+    alloc::{GlobalAlloc, Layout, System},
     mem::size_of,
     ptr::NonNull,
     sync::atomic::{AtomicBool, Ordering},
@@ -22,9 +22,9 @@ static mut ALLOC_INFO: Option<AllocList> = None;
 /// access to the ALLOC_INFO list.
 static ALLOC_LOCK: AllocLock = AllocLock::new();
 
-pub struct AllocWithInfo;
+pub struct GlobalAllocator;
 
-unsafe impl GlobalAlloc for AllocWithInfo {
+unsafe impl GlobalAlloc for GlobalAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ptr = libc::malloc(layout.size() as libc::size_t) as *mut u8;
         AllocMetadata::insert(ptr as usize, layout.size(), false);
@@ -44,35 +44,6 @@ unsafe impl GlobalAlloc for AllocWithInfo {
 
         AllocMetadata::update(ptr as usize, new_ptr as usize, new_size);
         new_ptr
-    }
-}
-
-pub struct GCMalloc;
-
-unsafe impl Alloc for GCMalloc {
-    unsafe fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocErr> {
-        let ptr = libc::malloc(layout.size() as libc::size_t) as *mut u8;
-        Ok(NonNull::new_unchecked(ptr))
-    }
-
-    unsafe fn dealloc(&mut self, ptr: NonNull<u8>, _layout: Layout) {
-        libc::free(ptr.as_ptr() as *mut libc::c_void);
-        AllocMetadata::remove(ptr.as_ptr() as usize);
-    }
-
-    unsafe fn realloc(
-        &mut self,
-        ptr: NonNull<u8>,
-        _layout: Layout,
-        new_size: usize,
-    ) -> Result<NonNull<u8>, AllocErr> {
-        let new_ptr = libc::realloc(ptr.as_ptr() as *mut libc::c_void, new_size) as *mut u8;
-
-        assert!(!ptr.as_ptr().is_null());
-        assert!(new_size > 0);
-
-        AllocMetadata::update(ptr.as_ptr() as usize, new_ptr as usize, new_size);
-        Ok(NonNull::new_unchecked(new_ptr))
     }
 }
 

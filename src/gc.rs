@@ -1,11 +1,11 @@
 use crate::{
     alloc::{AllocMetadata, PtrInfo},
-    Gc, Trace, GC_ALLOCATOR,
+    Gc, Trace,
 };
+
 use std::{
-    alloc::{Alloc, Layout},
+    alloc::{GlobalAlloc, Layout, System},
     mem::{align_of_val, size_of_val, transmute},
-    ptr::NonNull,
     sync::Mutex,
 };
 
@@ -245,8 +245,9 @@ impl Collector {
         let (layout, uoff) = Layout::new::<usize>().extend(obj_layout).unwrap();
         let baseptr = unsafe { (obj.objptr).sub(uoff) as *mut u8 };
 
+        AllocMetadata::remove(obj.objptr as usize);
         unsafe {
-            GC_ALLOCATOR.dealloc(NonNull::new_unchecked(baseptr), layout);
+            System.dealloc(baseptr, layout);
         }
     }
 

@@ -17,11 +17,11 @@ pub mod alloc;
 pub mod gc;
 
 use crate::{
-    alloc::{AllocMetadata, AllocWithInfo, GCMalloc},
+    alloc::{AllocMetadata, GlobalAllocator},
     gc::Collector,
 };
 use std::{
-    alloc::{Alloc, Layout},
+    alloc::{GlobalAlloc, Layout, System},
     mem::{forget, transmute},
     ops::{Deref, DerefMut},
     ptr,
@@ -30,11 +30,7 @@ use std::{
 use packed_struct::PackedStruct;
 
 #[global_allocator]
-static ALLOCATOR: AllocWithInfo = AllocWithInfo;
-
-/// Used for allocation of objects which are managed by the collector (through
-/// the `Gc` smart pointer interface).
-static mut GC_ALLOCATOR: GCMalloc = GCMalloc;
+static ALLOCATOR: GlobalAllocator = GlobalAllocator;
 
 static mut COLLECTOR: Option<Collector> = None;
 
@@ -170,7 +166,7 @@ impl<T> Gc<T> {
         //      must be a power of two, that means that we must by definition be
         //      adding at least one exact multiple of `usize` bytes of padding.
         unsafe {
-            let baseptr = GC_ALLOCATOR.alloc(layout).unwrap().as_ptr();
+            let baseptr = System.alloc(layout);
             let objptr = baseptr.add(uoff);
 
             // size excl. header and padding
