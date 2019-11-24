@@ -1,11 +1,11 @@
 use crate::{
-    alloc::{AllocMetadata, PtrInfo},
-    Gc, Trace, GC_ALLOCATOR,
+    alloc::{AllocMetadata, PtrInfo, BLOCK_METADATA},
+    Gc, Trace,
 };
+
 use std::{
-    alloc::{Alloc, Layout},
+    alloc::{GlobalAlloc, Layout, System},
     mem::{align_of_val, size_of_val, transmute},
-    ptr::NonNull,
     sync::Mutex,
 };
 
@@ -210,8 +210,8 @@ impl Collector {
     fn enter_sweep_phase(&mut self) {
         *self.state.lock().unwrap() = CollectorState::Sweeping;
 
-        for PtrInfo { ptr, .. } in AllocMetadata.iter().filter(|x| x.gc) {
-            let obj = unsafe { Gc::from_raw(ptr as *const OpaqueU8) };
+        for block in unsafe { BLOCK_METADATA.iter().filter(|x| x.map_or(false, |x| x.gc)) } {
+            let obj = unsafe { Gc::from_raw(block.unwrap().ptr as *const OpaqueU8) };
             if self.colour(obj) == Colour::White {
                 self.dealloc(obj);
             }
@@ -245,8 +245,9 @@ impl Collector {
         let (layout, uoff) = Layout::new::<usize>().extend(obj_layout).unwrap();
         let baseptr = unsafe { (obj.objptr).sub(uoff) as *mut u8 };
 
+        AllocMetadata::remove(obj.objptr as usize);
         unsafe {
-            GC_ALLOCATOR.dealloc(NonNull::new_unchecked(baseptr), layout);
+            System.dealloc(baseptr, layout);
         }
     }
 
