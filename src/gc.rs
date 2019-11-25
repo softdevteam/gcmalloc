@@ -1,6 +1,6 @@
 use crate::{
     alloc::{AllocMetadata, PtrInfo, BLOCK_METADATA},
-    GcBox, Trace,
+    GcBox,
 };
 
 use std::{
@@ -238,8 +238,8 @@ impl Collector {
     /// creating a hollow `Gc<Placeholder>` struct with `Gc::from_raw`.
     /// `Gc::new()` must *not* be used.
     fn dealloc(&self, boxptr: *mut GcBox<OpaqueU8>) {
-        let vptr = unsafe { (&*boxptr).vptr() };
-        let drop_trobj: &mut dyn Trace = unsafe { transmute((boxptr, vptr)) };
+        let vptr = unsafe { (&*boxptr).drop_vptr() };
+        let drop_trobj: &mut dyn Drop = unsafe { transmute((boxptr, vptr)) };
         let size = size_of_val(drop_trobj);
         let align = align_of_val(drop_trobj);
 
