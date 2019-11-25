@@ -86,11 +86,11 @@ impl<T> Gc<T> {
 /// while also permitting multiple, copyable `Gc` references. The `drop` method
 /// on `GcBox` acts as a guard, preventing the destructors on its contents from
 /// running unless the object is really dead.
-pub(crate) struct GcBox<T>(T);
+pub(crate) struct GcBox<T>(ManuallyDrop<T>);
 
 impl<T> GcBox<T> {
     fn new(value: T) -> *mut GcBox<T> {
-        let gcb = GcBox(value);
+        let gcb = GcBox(ManuallyDrop::new(value));
 
         let ptr = GcBox::alloc_blank(Layout::new::<T>());
         unsafe {
@@ -154,6 +154,12 @@ impl<T> GcBox<T> {
         self.set_header(header);
     }
 
+    pub(crate) fn set_dropped(&mut self, value: bool) {
+        let mut header = self.header();
+        header.dropped = value.into();
+        self.set_header(header);
+    }
+
     pub(crate) fn drop_vptr(&self) -> *mut u8 {
         let vptr = *self.header().drop_vptr as u64;
         vptr as usize as *mut u8
@@ -169,6 +175,9 @@ pub struct GcHeader {
     /// The pointer to the vtable for `Gc<T>`s `Drop` implementation.
     #[packed_field(bits = "0..=61", endian = "msb")]
     drop_vptr: Integer<u64, packed_bits::Bits62>,
+    /// Has `Drop::drop` been run?
+    #[packed_field(bits = "62")]
+    dropped: bool,
     /// Used by the GC during the marking phase
     #[packed_field(bits = "63")]
     mark_bit: bool,
@@ -179,6 +188,7 @@ impl GcHeader {
         let white = unsafe { !COLLECTOR.as_ref().unwrap().current_black() };
         GcHeader {
             drop_vptr: (vptr as u64).into(),
+            dropped: false,
             mark_bit: white,
         }
     }
@@ -199,7 +209,13 @@ impl<T> DerefMut for Gc<T> {
 }
 
 impl<T> Drop for GcBox<T> {
-    fn drop(&mut self) {}
+    fn drop(&mut self) {
+        if self.header().mark_bit || self.header().dropped {
+            return;
+        }
+        self.set_dropped(true);
+        unsafe { ManuallyDrop::drop(&mut self.0) };
+    }
 }
 
 /// `Copy` and `Clone` are implemented manually because a reference to `Gc<T>`
@@ -256,6 +272,12 @@ impl Debug {
             return collector.colour(&*(gc.objptr as *const GcBox<gc::OpaqueU8>))
                 == gc::Colour::Black;
         }
+    }
+
+    pub unsafe fn keep_alive<T>(gc: Gc<T>) {
+        let collector = COLLECTOR.as_ref().unwrap();
+        let boxed = &mut *(gc.objptr as *mut GcBox<gc::OpaqueU8>);
+        collector.mark(boxed, gc::Colour::Black);
     }
 }
 

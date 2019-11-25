@@ -1,5 +1,5 @@
 use crate::{
-    alloc::{AllocMetadata, PtrInfo, BLOCK_METADATA},
+    alloc::{AllocMetadata, PtrInfo, BLOCK_METADATA, VOH},
     GcBox,
 };
 
@@ -37,6 +37,7 @@ pub(crate) enum CollectorState {
     RootScanning,
     Marking,
     Sweeping,
+    Finalization,
 }
 
 /// Flags which affect the garbage collector's behaviour. They are useful for
@@ -103,6 +104,9 @@ pub(crate) struct Collector {
     /// phase is complete, and the full object-graph has been traversed.
     worklist: Vec<PtrInfo>,
 
+    /// Holds unreachable objects awaiting destruction.
+    drop_queue: VOH<*mut GcBox<OpaqueU8>>,
+
     /// The value of the mark-bit which the collector uses to denote whether an
     /// object is black (marked). As this can change after each collection, its
     /// current state needs storing.
@@ -121,6 +125,7 @@ impl Collector {
     pub(crate) fn new(debug_flags: DebugFlags) -> Self {
         Self {
             worklist: Vec::new(),
+            drop_queue: VOH::new(),
             black: true,
             debug_flags,
             state: Mutex::new(CollectorState::Ready),
@@ -158,6 +163,8 @@ impl Collector {
         if self.debug_flags.sweep_phase {
             self.enter_sweep_phase();
         }
+
+        self.enter_drop_phase();
 
         *self.state.lock().unwrap() = CollectorState::Ready;
     }
@@ -210,12 +217,10 @@ impl Collector {
     fn enter_sweep_phase(&mut self) {
         *self.state.lock().unwrap() = CollectorState::Sweeping;
 
-        unsafe {
-            for block in BLOCK_METADATA.iter().filter(|x| x.map_or(false, |x| x.gc)) {
-                let obj = block.unwrap().ptr as *mut GcBox<OpaqueU8>;
-                if self.colour(&*obj) == Colour::White {
-                    self.dealloc(obj);
-                }
+        for block in unsafe { BLOCK_METADATA.iter().filter(|x| x.map_or(false, |x| x.gc)) } {
+            let obj = block.unwrap().ptr as *mut GcBox<OpaqueU8>;
+            if self.colour(unsafe { &*obj }) == Colour::White {
+                self.drop_queue.push(obj);
             }
         }
 
@@ -226,6 +231,28 @@ impl Collector {
         // store this mark bit in each object header, this would be a very
         // expensive operation.
         self.black = !self.black;
+    }
+
+    /// The entry-point to the drop phase.
+    ///
+    /// Iterates over the objects in the drop queue and run their destructors.
+    /// Since Rust's `Drop` trait is used, the drop semantics should be familiar
+    /// to Rust users: destructors are run from the outside-in. In the case of
+    /// cycles between `Gc` objects, no guarantees are made about which
+    /// destructor is ran first.
+    fn enter_drop_phase(&mut self) {
+        *self.state.lock().unwrap() = CollectorState::Finalization;
+
+        for boxptr in self.drop_queue.iter().filter_map(|x| *x) {
+            unsafe {
+                let vptr = (&*boxptr).drop_vptr();
+                let fatptr: &mut dyn Drop = transmute((boxptr, vptr));
+                ::std::ptr::drop_in_place(fatptr);
+            }
+            self.dealloc(boxptr);
+        }
+
+        self.drop_queue = VOH::new()
     }
 
     /// Free the contents of a Gc<T>. It is deliberately not a monomorphised
@@ -279,7 +306,7 @@ impl Collector {
         }
     }
 
-    fn mark(&self, obj: &mut GcBox<OpaqueU8>, colour: Colour) {
+    pub(crate) fn mark(&self, obj: &mut GcBox<OpaqueU8>, colour: Colour) {
         match colour {
             Colour::Black => obj.set_mark_bit(self.black),
             Colour::White => obj.set_mark_bit(!self.black),
