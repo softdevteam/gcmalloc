@@ -25,7 +25,7 @@ use crate::{
 };
 use std::{
     alloc::{GlobalAlloc, Layout, System},
-    mem::{forget, transmute},
+    mem::{forget, transmute, ManuallyDrop},
     ops::{Deref, DerefMut},
     ptr,
 };
@@ -36,27 +36,6 @@ use packed_struct::PackedStruct;
 static ALLOCATOR: GlobalAllocator = GlobalAllocator;
 
 static mut COLLECTOR: Option<Collector> = None;
-
-/// Used to specify how a value is traversed by a garbage collector.
-///
-/// In order for a value to be managed by the garbage collector, its type, `T`,
-/// must implement `Trace`. The `trace` method tells the garbage collector where
-/// to find `Gc` values reachable from `T`. Fields which reference `Gc` values
-/// -- either directly or indirectly -- are included in the `trace` method,
-/// which is then called by the garbage collector when marking objects.
-///
-/// TODO: This trait is only necessary for precise tracing of garbage collected
-/// objects. At the moment, is not used because all objects are conservatively
-/// scanned, word-by-word, looking for values which resemble pointers. However,
-/// we still implement `Trace` on all `Gc`s.
-///
-/// Since the goal is that garbage collected objects are eventually traced
-/// precisely using the trait-based `Trace` API, requiring this upfront serves
-/// as a useful placeholder so that we can use the trait-object based layout
-/// trick in the meantime.
-pub(crate) trait Trace {
-    fn trace(&self) {}
-}
 
 /// A garbage collected pointer. 'Gc' stands for 'Garbage collected'.
 ///
@@ -91,26 +70,9 @@ pub struct Gc<T> {
 impl<T> Gc<T> {
     /// Constructs a new `Gc<T>`.
     pub fn new(v: T) -> Self {
-        let objptr = Self::alloc_blank(Layout::new::<T>());
-        let mut gc = unsafe {
-            objptr.copy_from_nonoverlapping(&v, 1);
-            Gc::from_raw(objptr)
-        };
-
-        forget(v);
-
-        let to: &dyn Trace = &gc;
-        let vptr = unsafe { transmute::<*const dyn Trace, (usize, usize)>(to).1 };
-        gc.set_header(GcHeader::new(vptr));
-
-        gc
-    }
-
-    /// Create a `Gc` from a raw pointer previously created by `alloc_blank` or
-    /// `into_raw`.
-    pub unsafe fn from_raw(objptr: *const T) -> Self {
+        let boxed = GcBox::new(v);
         Gc {
-            objptr: objptr as *mut T,
+            objptr: boxed as *mut T,
         }
     }
 
@@ -118,45 +80,38 @@ impl<T> Gc<T> {
     pub fn as_ptr(&self) -> *const T {
         self.objptr
     }
+}
 
-    /// Returns a reference to the header of the `Gc<T>`. The header stores
-    /// meta-data about the value used by the collector. For example, the
-    /// mark-bit used to denote the object's reachability, is stored in
-    /// the header.
-    fn header(&self) -> GcHeader {
-        let raw_bytes = unsafe {
-            let headerptr = (self.objptr as *const usize).sub(1) as *mut [u8; 8];
-            std::ptr::read(headerptr)
-        };
-        GcHeader::unpack(&raw_bytes).unwrap()
-    }
+/// A `GcBox` is a 0-cost wrapper which allows a single `Drop` implementation
+/// while also permitting multiple, copyable `Gc` references. The `drop` method
+/// on `GcBox` acts as a guard, preventing the destructors on its contents from
+/// running unless the object is really dead.
+pub(crate) struct GcBox<T>(ManuallyDrop<T>);
 
-    fn set_header(&mut self, header: GcHeader) {
+impl<T> GcBox<T> {
+    fn new(value: T) -> *mut GcBox<T> {
+        let gcb = GcBox(ManuallyDrop::new(value));
+
+        let ptr = GcBox::alloc_blank(Layout::new::<T>());
         unsafe {
-            let headerptr = (self.objptr as *const usize).sub(1) as *mut [u8; 8];
-            ptr::write(headerptr, GcHeader::pack(&header));
+            ptr.copy_from_nonoverlapping(&gcb, 1);
         }
-    }
 
-    pub(crate) fn vptr(&self) -> usize {
-        *self.header().trace_vptr as usize
-    }
+        let fatptr: &dyn Drop = &gcb;
+        unsafe {
+            let vptr = transmute::<*const dyn Drop, (usize, usize)>(fatptr).1;
+            (&mut *ptr).set_header(GcHeader::new(vptr));
+        }
 
-    /// Get the value of the mark bit stored in the header of the `Gc<T>` value.
-    pub(crate) fn mark_bit(&self) -> bool {
-        self.header().mark_bit
-    }
+        forget(gcb);
 
-    pub(crate) fn set_mark_bit(&mut self, value: bool) {
-        let mut header = self.header();
-        header.mark_bit = value.into();
-        self.set_header(header);
+        ptr
     }
 
     /// Allocate memory sufficient to `l` (i.e. correctly aligned and of at
     /// least the required size). The returned pointer must be passed to
-    /// `Gc::from_raw`.
-    pub fn alloc_blank(l: Layout) -> *mut T {
+    /// `GcBox::from_raw`.
+    pub fn alloc_blank(l: Layout) -> *mut GcBox<T> {
         let (layout, uoff) = Layout::new::<usize>().extend(l).unwrap();
         // In order for our storage scheme to work, it's necessary that `uoff -
         // sizeof::<usize>()` gives a valid alignment for a `usize`. There are
@@ -175,8 +130,39 @@ impl<T> Gc<T> {
             // size excl. header and padding
             let objsize = layout.size() - (objptr as usize - baseptr as usize);
             AllocMetadata::insert(objptr as usize, objsize, true);
-            objptr as *mut T
+            objptr as *mut GcBox<T>
         }
+    }
+
+    fn header(&self) -> GcHeader {
+        unsafe {
+            let headerptr = (self as *const GcBox<T> as *const [u8; 8]).sub(1);
+            GcHeader::unpack(&*headerptr).unwrap()
+        }
+    }
+
+    fn set_header(&mut self, header: GcHeader) {
+        unsafe {
+            let headerptr = (self as *mut GcBox<T> as *mut [u8; 8]).sub(1);
+            ptr::write(headerptr, GcHeader::pack(&header));
+        }
+    }
+
+    pub(crate) fn set_mark_bit(&mut self, value: bool) {
+        let mut header = self.header();
+        header.mark_bit = value.into();
+        self.set_header(header);
+    }
+
+    pub(crate) fn set_dropped(&mut self, value: bool) {
+        let mut header = self.header();
+        header.dropped = value.into();
+        self.set_header(header);
+    }
+
+    pub(crate) fn drop_vptr(&self) -> *mut u8 {
+        let vptr = *self.header().drop_vptr as u64;
+        vptr as usize as *mut u8
     }
 }
 
@@ -186,9 +172,12 @@ impl<T> Gc<T> {
 #[derive(PackedStruct, Debug)]
 #[packed_struct(bit_numbering = "msb0", size_bytes = "8")]
 pub struct GcHeader {
-    /// The pointer to the vtable for `Gc<T>`s `Trace` implementation.
-    #[packed_field(bits = "0..=62", endian = "msb")]
-    trace_vptr: Integer<u64, packed_bits::Bits62>,
+    /// The pointer to the vtable for `Gc<T>`s `Drop` implementation.
+    #[packed_field(bits = "0..=61", endian = "msb")]
+    drop_vptr: Integer<u64, packed_bits::Bits62>,
+    /// Has `Drop::drop` been run?
+    #[packed_field(bits = "62")]
+    dropped: bool,
     /// Used by the GC during the marking phase
     #[packed_field(bits = "63")]
     mark_bit: bool,
@@ -198,7 +187,8 @@ impl GcHeader {
     pub(crate) fn new(vptr: usize) -> Self {
         let white = unsafe { !COLLECTOR.as_ref().unwrap().current_black() };
         GcHeader {
-            trace_vptr: (vptr as u64).into(),
+            drop_vptr: (vptr as u64).into(),
+            dropped: false,
             mark_bit: white,
         }
     }
@@ -218,6 +208,16 @@ impl<T> DerefMut for Gc<T> {
     }
 }
 
+impl<T> Drop for GcBox<T> {
+    fn drop(&mut self) {
+        if self.header().mark_bit || self.header().dropped {
+            return;
+        }
+        self.set_dropped(true);
+        unsafe { ManuallyDrop::drop(&mut self.0) };
+    }
+}
+
 /// `Copy` and `Clone` are implemented manually because a reference to `Gc<T>`
 /// should be copyable regardless of `T`. It differs subtly from `#[derive(Copy,
 /// Clone)]` in that the latter only makes `Gc<T>` copyable if `T` is.
@@ -228,8 +228,6 @@ impl<T> Clone for Gc<T> {
         *self
     }
 }
-
-impl<T> Trace for Gc<T> {}
 
 /// Initialize the garbage collector. This *must* happen before any `Gc<T>`s are
 /// allocated.
@@ -270,8 +268,16 @@ impl Debug {
         assert!(!collector.debug_flags.sweep_phase);
         assert_eq!(cstate, gc::CollectorState::Ready);
 
-        return collector.colour(unsafe { Gc::from_raw(gc.objptr as *const gc::OpaqueU8) })
-            == gc::Colour::Black;
+        unsafe {
+            return collector.colour(&*(gc.objptr as *const GcBox<gc::OpaqueU8>))
+                == gc::Colour::Black;
+        }
+    }
+
+    pub unsafe fn keep_alive<T>(gc: Gc<T>) {
+        let collector = COLLECTOR.as_ref().unwrap();
+        let boxed = &mut *(gc.objptr as *mut GcBox<gc::OpaqueU8>);
+        collector.mark(boxed, gc::Colour::Black);
     }
 }
 

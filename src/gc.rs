@@ -1,6 +1,6 @@
 use crate::{
-    alloc::{AllocMetadata, PtrInfo, BLOCK_METADATA},
-    Gc, Trace,
+    alloc::{AllocMetadata, PtrInfo, BLOCK_METADATA, VOH},
+    GcBox,
 };
 
 use std::{
@@ -37,6 +37,7 @@ pub(crate) enum CollectorState {
     RootScanning,
     Marking,
     Sweeping,
+    Finalization,
 }
 
 /// Flags which affect the garbage collector's behaviour. They are useful for
@@ -103,6 +104,9 @@ pub(crate) struct Collector {
     /// phase is complete, and the full object-graph has been traversed.
     worklist: Vec<PtrInfo>,
 
+    /// Holds unreachable objects awaiting destruction.
+    drop_queue: VOH<*mut GcBox<OpaqueU8>>,
+
     /// The value of the mark-bit which the collector uses to denote whether an
     /// object is black (marked). As this can change after each collection, its
     /// current state needs storing.
@@ -121,6 +125,7 @@ impl Collector {
     pub(crate) fn new(debug_flags: DebugFlags) -> Self {
         Self {
             worklist: Vec::new(),
+            drop_queue: VOH::new(),
             black: true,
             debug_flags,
             state: Mutex::new(CollectorState::Ready),
@@ -159,6 +164,8 @@ impl Collector {
             self.enter_sweep_phase();
         }
 
+        self.enter_drop_phase();
+
         *self.state.lock().unwrap() = CollectorState::Ready;
     }
 
@@ -182,7 +189,7 @@ impl Collector {
                 // object's header. This means that unlike regular allocations,
                 // `ptr` will never point to the beginning of the allocation
                 // block.
-                let obj = unsafe { Gc::from_raw(ptr as *const OpaqueU8) };
+                let obj = unsafe { &mut *(ptr as *mut GcBox<OpaqueU8>) };
                 if self.colour(obj) == Colour::Black {
                     continue;
                 }
@@ -211,9 +218,9 @@ impl Collector {
         *self.state.lock().unwrap() = CollectorState::Sweeping;
 
         for block in unsafe { BLOCK_METADATA.iter().filter(|x| x.map_or(false, |x| x.gc)) } {
-            let obj = unsafe { Gc::from_raw(block.unwrap().ptr as *const OpaqueU8) };
-            if self.colour(obj) == Colour::White {
-                self.dealloc(obj);
+            let obj = block.unwrap().ptr as *mut GcBox<OpaqueU8>;
+            if self.colour(unsafe { &*obj }) == Colour::White {
+                self.drop_queue.push(obj);
             }
         }
 
@@ -226,6 +233,28 @@ impl Collector {
         self.black = !self.black;
     }
 
+    /// The entry-point to the drop phase.
+    ///
+    /// Iterates over the objects in the drop queue and run their destructors.
+    /// Since Rust's `Drop` trait is used, the drop semantics should be familiar
+    /// to Rust users: destructors are run from the outside-in. In the case of
+    /// cycles between `Gc` objects, no guarantees are made about which
+    /// destructor is ran first.
+    fn enter_drop_phase(&mut self) {
+        *self.state.lock().unwrap() = CollectorState::Finalization;
+
+        for boxptr in self.drop_queue.iter().filter_map(|x| *x) {
+            unsafe {
+                let vptr = (&*boxptr).drop_vptr();
+                let fatptr: &mut dyn Drop = transmute((boxptr, vptr));
+                ::std::ptr::drop_in_place(fatptr);
+            }
+            self.dealloc(boxptr);
+        }
+
+        self.drop_queue = VOH::new()
+    }
+
     /// Free the contents of a Gc<T>. It is deliberately not a monomorphised
     /// because during collection, the concrete type of T is unknown. Instead,
     /// an arbitrary placeholder type is used to represent the contents as the
@@ -235,18 +264,19 @@ impl Collector {
     /// A raw pointer to a known `Gc<T>` can be passed to this method by
     /// creating a hollow `Gc<Placeholder>` struct with `Gc::from_raw`.
     /// `Gc::new()` must *not* be used.
-    fn dealloc(&self, obj: Gc<OpaqueU8>) {
-        let to = unsafe {
-            transmute::<(usize, usize), &mut dyn Trace>((obj.objptr as usize, obj.vptr()))
-        };
-        let size = size_of_val(to);
-        let align = align_of_val(to);
-        let obj_layout = unsafe { Layout::from_size_align_unchecked(size, align) };
-        let (layout, uoff) = Layout::new::<usize>().extend(obj_layout).unwrap();
-        let baseptr = unsafe { (obj.objptr).sub(uoff) as *mut u8 };
+    fn dealloc(&self, boxptr: *mut GcBox<OpaqueU8>) {
+        let vptr = unsafe { (&*boxptr).drop_vptr() };
+        let drop_trobj: &mut dyn Drop = unsafe { transmute((boxptr, vptr)) };
+        let size = size_of_val(drop_trobj);
+        let align = align_of_val(drop_trobj);
 
-        AllocMetadata::remove(obj.objptr as usize);
         unsafe {
+            let (layout, uoff) = Layout::new::<usize>()
+                .extend(Layout::from_size_align_unchecked(size, align))
+                .unwrap();
+            let baseptr = (boxptr as *mut u8).sub(uoff);
+
+            AllocMetadata::remove(boxptr as usize);
             System.dealloc(baseptr, layout);
         }
     }
@@ -268,15 +298,15 @@ impl Collector {
         }
     }
 
-    pub(crate) fn colour(&self, obj: Gc<OpaqueU8>) -> Colour {
-        if obj.mark_bit() == self.black {
+    pub(crate) fn colour(&self, obj: &GcBox<OpaqueU8>) -> Colour {
+        if obj.header().mark_bit == self.black {
             Colour::Black
         } else {
             Colour::White
         }
     }
 
-    fn mark(&self, mut obj: Gc<OpaqueU8>, colour: Colour) {
+    pub(crate) fn mark(&self, obj: &mut GcBox<OpaqueU8>, colour: Colour) {
         match colour {
             Colour::Black => obj.set_mark_bit(self.black),
             Colour::White => obj.set_mark_bit(!self.black),
