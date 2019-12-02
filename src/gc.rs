@@ -1,11 +1,12 @@
 use crate::{
-    alloc::{AllocMetadata, PtrInfo, BLOCK_METADATA, VOH},
-    GcBox,
+    alloc::{PtrInfo, VOH},
+    GcBox, ALLOCATOR, GC_ALLOCATOR,
 };
 
 use std::{
-    alloc::{GlobalAlloc, Layout, System},
+    alloc::{Alloc, Layout},
     mem::{align_of_val, size_of_val, transmute},
+    ptr::NonNull,
     sync::Mutex,
 };
 
@@ -132,10 +133,6 @@ impl Collector {
         }
     }
 
-    pub(crate) fn current_black(&self) -> bool {
-        self.black
-    }
-
     /// The only entry-point to a collection. All collection phases must be
     /// triggered through this method. It is UB to call any of them
     /// individually.
@@ -184,11 +181,6 @@ impl Collector {
             let PtrInfo { ptr, size, gc } = self.worklist.pop().unwrap();
 
             if gc {
-                // For GC objects, the pointer recorded in the alloc metadata
-                // list points to the beginning of the object -- *not* the
-                // object's header. This means that unlike regular allocations,
-                // `ptr` will never point to the beginning of the allocation
-                // block.
                 let obj = unsafe { &mut *(ptr as *mut GcBox<OpaqueU8>) };
                 if self.colour(obj) == Colour::Black {
                     continue;
@@ -200,8 +192,11 @@ impl Collector {
             for addr in (ptr..ptr + size).step_by(WORD_SIZE) {
                 let word = unsafe { *(addr as *const Word) };
 
-                if let Some(ptrinfo) = AllocMetadata::find(word) {
-                    self.worklist.push(ptrinfo)
+                if let Some(block) = ALLOCATOR
+                    .iter()
+                    .find(|x| x.ptr == word || word > x.ptr && word < x.ptr + x.size)
+                {
+                    self.worklist.push(block)
                 }
             }
         }
@@ -217,8 +212,8 @@ impl Collector {
     fn enter_sweep_phase(&mut self) {
         *self.state.lock().unwrap() = CollectorState::Sweeping;
 
-        for block in unsafe { BLOCK_METADATA.iter().filter(|x| x.map_or(false, |x| x.gc)) } {
-            let obj = block.unwrap().ptr as *mut GcBox<OpaqueU8>;
+        for block in ALLOCATOR.iter().filter(|x| x.gc) {
+            let obj = block.ptr as *mut GcBox<OpaqueU8>;
             if self.colour(unsafe { &*obj }) == Colour::White {
                 self.drop_queue.push(obj);
             }
@@ -271,13 +266,8 @@ impl Collector {
         let align = align_of_val(drop_trobj);
 
         unsafe {
-            let (layout, uoff) = Layout::new::<usize>()
-                .extend(Layout::from_size_align_unchecked(size, align))
-                .unwrap();
-            let baseptr = (boxptr as *mut u8).sub(uoff);
-
-            AllocMetadata::remove(boxptr as usize);
-            System.dealloc(baseptr, layout);
+            let layout = Layout::from_size_align_unchecked(size, align);
+            GC_ALLOCATOR.dealloc(NonNull::new_unchecked(boxptr as *mut u8), layout);
         }
     }
 
@@ -292,14 +282,17 @@ impl Collector {
 
         for stack_address in (rsp..stack_top).step_by(WORD_SIZE) {
             let stack_word = unsafe { *(stack_address as *const Word) };
-            if let Some(ptr_info) = AllocMetadata::find(stack_word) {
-                self.worklist.push(ptr_info)
+            if let Some(block) = ALLOCATOR
+                .iter()
+                .find(|x| x.ptr == stack_word || stack_word > x.ptr && stack_word < x.ptr + x.size)
+            {
+                self.worklist.push(block);
             }
         }
     }
 
     pub(crate) fn colour(&self, obj: &GcBox<OpaqueU8>) -> Colour {
-        if obj.header().mark_bit == self.black {
+        if obj.metadata().mark_bit == self.black {
             Colour::Black
         } else {
             Colour::White
