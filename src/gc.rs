@@ -1,5 +1,5 @@
 use crate::{
-    alloc::{PtrInfo, VOH},
+    alloc::{GcVec, PtrInfo},
     GcBox, ALLOCATOR, GC_ALLOCATOR,
 };
 
@@ -103,10 +103,10 @@ pub(crate) struct Collector {
     /// Used during the mark phase. The marking worklist consists of allocation
     /// blocks which still need tracing. Once the worklist is empty, the marking
     /// phase is complete, and the full object-graph has been traversed.
-    worklist: Vec<PtrInfo>,
+    worklist: GcVec<PtrInfo>,
 
     /// Holds unreachable objects awaiting destruction.
-    drop_queue: VOH<*mut GcBox<OpaqueU8>>,
+    drop_queue: GcVec<*mut GcBox<OpaqueU8>>,
 
     /// The value of the mark-bit which the collector uses to denote whether an
     /// object is black (marked). As this can change after each collection, its
@@ -125,8 +125,8 @@ pub(crate) struct Collector {
 impl Collector {
     pub(crate) fn new(debug_flags: DebugFlags) -> Self {
         Self {
-            worklist: Vec::new(),
-            drop_queue: VOH::new(),
+            worklist: GcVec::new(),
+            drop_queue: GcVec::new(),
             black: true,
             debug_flags,
             state: Mutex::new(CollectorState::Ready),
@@ -238,16 +238,16 @@ impl Collector {
     fn enter_drop_phase(&mut self) {
         *self.state.lock().unwrap() = CollectorState::Finalization;
 
-        for boxptr in self.drop_queue.iter().filter_map(|x| *x) {
+        for boxptr in self.drop_queue.iter() {
             unsafe {
-                let vptr = (&*boxptr).drop_vptr();
-                let fatptr: &mut dyn Drop = transmute((boxptr, vptr));
+                let vptr = (&mut **boxptr).drop_vptr();
+                let fatptr: &mut dyn Drop = transmute((*boxptr, vptr));
                 ::std::ptr::drop_in_place(fatptr);
             }
-            self.dealloc(boxptr);
+            self.dealloc(*boxptr);
         }
 
-        self.drop_queue = VOH::new()
+        self.drop_queue = GcVec::new()
     }
 
     /// Free the contents of a Gc<T>. It is deliberately not a monomorphised

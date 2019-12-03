@@ -248,32 +248,20 @@ impl Iterator for BlocksIter {
     }
 }
 
-/// A VOH (Vector of Holes) is a contiguous growable array type optimised for
-/// fast insertion and O(1) removal.
+/// A GcVec is a contiguous growable array type whose contents are not tracked
+/// for garbage collection.
 ///
-/// Unlike the `Vec<T>` type available in the standard library, `VOH<T>`
-/// does not shift remaining elements to the left after removing an item.
-/// Instead, a `None` value is swapped in its place, effectively leaving a hole
-/// inside the vector.
-///
-/// Accessing elements in a `VOH<T>`, however, can be slower than a
-/// `Vec<T>`, as elements are no longer strictly contiguous; fragmentation will
-/// occur over time as removed elements increase the distance between those
-/// which remain.
-///
-/// The API to `VOH<T>` can be thought of as a heavily stripped down
-/// version of `Vec<T>`. Its use-case is highly specific, and intended only to
-/// be used internally as part of the Collector implementation. For this reason,
-/// its allocation is not tracked by the collector. Do not store any values
-/// inside which you intend the GC to keep alive.
-pub(crate) struct VOH<T> {
-    buf: RawVec<Option<T>, System>,
+/// The API to `GcVec` can be thought of as a heavily stripped down version of
+/// `Vec`. It is intended only to be used internally as part of the Collector
+/// implementation where objects do not need keeping alive by the GC.
+pub(crate) struct GcVec<T> {
+    buf: RawVec<T, System>,
     len: usize,
 }
 
-impl<T> VOH<T> {
+impl<T> GcVec<T> {
     #[inline]
-    pub const fn new() -> VOH<T> {
+    pub const fn new() -> GcVec<T> {
         Self {
             // use the system allocator instead of the global allocator
             buf: RawVec::new_in(System),
@@ -294,7 +282,7 @@ impl<T> VOH<T> {
         }
         unsafe {
             let end = self.as_mut_ptr().add(self.len);
-            ::std::ptr::write(end, Some(value));
+            ::std::ptr::write(end, value);
             self.len += 1;
         }
     }
@@ -305,13 +293,13 @@ impl<T> VOH<T> {
         } else {
             unsafe {
                 self.len -= 1;
-                ptr::read(self.get_unchecked(self.len()))
+                Some(ptr::read(self.get_unchecked(self.len())))
             }
         }
     }
 
     /// Reserves capacity for at least `additional` more elements to be inserted
-    /// in the given `VOH<T>`. The collection may reserve more space to avoid
+    /// in the given `GcVec<T>`. The collection may reserve more space to avoid
     /// frequent reallocations. After calling `reserve`, capacity will be
     /// greater than or equal to `self.len() + additional`. Does nothing if
     /// capacity is already sufficient.
@@ -322,32 +310,10 @@ impl<T> VOH<T> {
     pub fn reserve(&mut self, additional: usize) {
         self.buf.reserve(self.len, additional);
     }
-
-    /// Removes and returns the element at position `index` within the vector if
-    /// it exists. Removal is O(1): the value at position `index` is simply
-    /// replaced with `None`. Since the vector does not shift all elements after
-    /// it to the left, removal does not decrease the length of the vector.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `index` is out of bounds.
-    pub fn remove(&mut self, index: usize) -> Option<T> {
-        assert!(index < self.len());
-        unsafe {
-            // the place we are taking from.
-            let ptr = self.as_mut_ptr().add(index);
-            // copy it out, unsafely having a copy of the value on
-            // the stack and in the vector at the same time.
-            let ret = ::std::ptr::read(ptr);
-
-            ::std::ptr::write(ptr, None);
-            ret
-        }
-    }
 }
 
-impl<T> ::std::ops::Deref for VOH<T> {
-    type Target = [Option<T>];
+impl<T> ::std::ops::Deref for GcVec<T> {
+    type Target = [T];
 
     fn deref(&self) -> &Self::Target {
         unsafe {
@@ -358,7 +324,7 @@ impl<T> ::std::ops::Deref for VOH<T> {
     }
 }
 
-impl<T> ::std::ops::DerefMut for VOH<T> {
+impl<T> ::std::ops::DerefMut for GcVec<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe {
             let p = self.buf.ptr();
