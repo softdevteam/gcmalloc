@@ -14,26 +14,23 @@ extern crate packed_struct;
 #[macro_use]
 extern crate packed_struct_codegen;
 
-use packed_struct::prelude::*;
-
 pub mod alloc;
 pub mod gc;
 
 use crate::{
-    alloc::{AllocMetadata, GlobalAllocator},
+    alloc::{BlockHeader, BlockMetadata, GcAllocator, GlobalAllocator},
     gc::Collector,
 };
 use std::{
-    alloc::{GlobalAlloc, Layout, System},
+    alloc::{Alloc, Layout},
     mem::{forget, transmute, ManuallyDrop},
     ops::{Deref, DerefMut},
-    ptr,
 };
-
-use packed_struct::PackedStruct;
 
 #[global_allocator]
 static ALLOCATOR: GlobalAllocator = GlobalAllocator;
+
+static mut GC_ALLOCATOR: GcAllocator = GcAllocator;
 
 static mut COLLECTOR: Option<Collector> = None;
 
@@ -90,107 +87,60 @@ pub(crate) struct GcBox<T>(ManuallyDrop<T>);
 
 impl<T> GcBox<T> {
     fn new(value: T) -> *mut GcBox<T> {
-        let gcb = GcBox(ManuallyDrop::new(value));
+        let layout = Layout::new::<T>();
 
-        let ptr = GcBox::alloc_blank(Layout::new::<T>());
+        let ptr = unsafe { GC_ALLOCATOR.alloc(layout).unwrap().as_ptr() } as *mut GcBox<T>;
+        let gcbox = GcBox(ManuallyDrop::new(value));
         unsafe {
-            ptr.copy_from_nonoverlapping(&gcb, 1);
+            ptr.copy_from_nonoverlapping(&gcbox, 1);
         }
 
-        let fatptr: &dyn Drop = &gcb;
-        unsafe {
-            let vptr = transmute::<*const dyn Drop, (usize, usize)>(fatptr).1;
-            (&mut *ptr).set_header(GcHeader::new(vptr));
-        }
+        forget(gcbox);
 
-        forget(gcb);
+        unsafe {
+            let fatptr: &dyn Drop = &*ptr;
+            let vptr = transmute::<*const dyn Drop, (usize, *mut u8)>(fatptr).1;
+            (*ptr).set_drop_vptr(vptr);
+        }
 
         ptr
     }
 
-    /// Allocate memory sufficient to `l` (i.e. correctly aligned and of at
-    /// least the required size). The returned pointer must be passed to
-    /// `GcBox::from_raw`.
-    pub fn alloc_blank(l: Layout) -> *mut GcBox<T> {
-        let (layout, uoff) = Layout::new::<usize>().extend(l).unwrap();
-        // In order for our storage scheme to work, it's necessary that `uoff -
-        // sizeof::<usize>()` gives a valid alignment for a `usize`. There are
-        // only two cases we need to consider here:
-        //   1) `object`'s alignment is smaller than or equal to `usize`. If so,
-        //      no padding will be added, at which point by definition `uoff -
-        //      sizeof::<usize>()` will be exactly equivalent to the start point
-        //      of the layout.
-        //   2) `object`'s alignment is bigger than `usize`. Since alignment
-        //      must be a power of two, that means that we must by definition be
-        //      adding at least one exact multiple of `usize` bytes of padding.
+    fn metadata(&self) -> BlockMetadata {
         unsafe {
-            let baseptr = System.alloc(layout);
-            let objptr = baseptr.add(uoff);
-
-            // size excl. header and padding
-            let objsize = layout.size() - (objptr as usize - baseptr as usize);
-            AllocMetadata::insert(objptr as usize, objsize, true);
-            objptr as *mut GcBox<T>
+            let headerptr = (self as *const GcBox<T> as *mut BlockHeader).sub(1);
+            (&*headerptr).metadata()
         }
     }
 
-    fn header(&self) -> GcHeader {
+    fn set_metadata(&mut self, header: BlockMetadata) {
         unsafe {
-            let headerptr = (self as *const GcBox<T> as *const [u8; 8]).sub(1);
-            GcHeader::unpack(&*headerptr).unwrap()
-        }
-    }
-
-    fn set_header(&mut self, header: GcHeader) {
-        unsafe {
-            let headerptr = (self as *mut GcBox<T> as *mut [u8; 8]).sub(1);
-            ptr::write(headerptr, GcHeader::pack(&header));
+            let headerptr = (self as *const GcBox<T> as *mut BlockHeader).sub(1);
+            (*headerptr).set_metadata(header)
         }
     }
 
     pub(crate) fn set_mark_bit(&mut self, value: bool) {
-        let mut header = self.header();
-        header.mark_bit = value.into();
-        self.set_header(header);
+        let mut metadata = self.metadata();
+        metadata.mark_bit = value.into();
+        self.set_metadata(metadata);
     }
 
     pub(crate) fn set_dropped(&mut self, value: bool) {
-        let mut header = self.header();
-        header.dropped = value.into();
-        self.set_header(header);
+        let mut metadata = self.metadata();
+        metadata.dropped = value.into();
+        self.set_metadata(metadata);
+    }
+
+    pub(crate) fn set_drop_vptr(&mut self, value: *mut u8) {
+        let mut metadata = self.metadata();
+        metadata.drop_vptr = (value as u64).into();
+        self.set_metadata(metadata);
     }
 
     pub(crate) fn drop_vptr(&self) -> *mut u8 {
-        let vptr = *self.header().drop_vptr as u64;
+        let vptr = *self.metadata().drop_vptr as u64;
         vptr as usize as *mut u8
-    }
-}
-
-/// A garbage collected value is stored with a 1 machine word sized header. This
-/// header stores important metadata used by the GC during collection. It should
-/// never be accessible to users of the GC library.
-#[derive(PackedStruct, Debug)]
-#[packed_struct(bit_numbering = "msb0", size_bytes = "8")]
-pub struct GcHeader {
-    /// The pointer to the vtable for `Gc<T>`s `Drop` implementation.
-    #[packed_field(bits = "0..=61", endian = "msb")]
-    drop_vptr: Integer<u64, packed_bits::Bits62>,
-    /// Has `Drop::drop` been run?
-    #[packed_field(bits = "62")]
-    dropped: bool,
-    /// Used by the GC during the marking phase
-    #[packed_field(bits = "63")]
-    mark_bit: bool,
-}
-
-impl GcHeader {
-    pub(crate) fn new(vptr: usize) -> Self {
-        let white = unsafe { !COLLECTOR.as_ref().unwrap().current_black() };
-        GcHeader {
-            drop_vptr: (vptr as u64).into(),
-            dropped: false,
-            mark_bit: white,
-        }
     }
 }
 
@@ -210,7 +160,7 @@ impl<T> DerefMut for Gc<T> {
 
 impl<T> Drop for GcBox<T> {
     fn drop(&mut self) {
-        if self.header().mark_bit || self.header().dropped {
+        if self.metadata().mark_bit || self.metadata().dropped {
             return;
         }
         self.set_dropped(true);
@@ -278,18 +228,5 @@ impl Debug {
         let collector = COLLECTOR.as_ref().unwrap();
         let boxed = &mut *(gc.objptr as *mut GcBox<gc::OpaqueU8>);
         collector.mark(boxed, gc::Colour::Black);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn alloc_with_gc() {
-        init(gc::DebugFlags::new());
-        let gc = Gc::new(1234);
-        let pi = AllocMetadata::find(gc.objptr as usize).unwrap();
-        assert!(pi.gc)
     }
 }
