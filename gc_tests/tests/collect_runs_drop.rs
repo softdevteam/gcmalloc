@@ -16,7 +16,7 @@ impl Drop for IncrOnDrop {
 }
 
 fn main() {
-    gcmalloc::init(DebugFlags::new().mark_phase(false));
+    gcmalloc::debug_flags(DebugFlags::new().mark_phase(false));
 
     Gc::new(IncrOnDrop(123));
 

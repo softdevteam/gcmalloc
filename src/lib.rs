@@ -19,7 +19,7 @@ pub mod gc;
 
 use crate::{
     alloc::{BlockHeader, BlockMetadata, GcAllocator, GlobalAllocator},
-    gc::Collector,
+    gc::{Collector, CollectorState},
 };
 use std::{
     alloc::{Alloc, Layout},
@@ -27,12 +27,16 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
+use parking_lot::Mutex;
+
 #[global_allocator]
 static ALLOCATOR: GlobalAllocator = GlobalAllocator;
 
 static mut GC_ALLOCATOR: GcAllocator = GcAllocator;
 
-static mut COLLECTOR: Option<Collector> = None;
+static COLLECTOR: Mutex<Collector> = Mutex::new(Collector::new());
+
+static COLLECTOR_STATE: Mutex<CollectorState> = Mutex::new(CollectorState::Ready);
 
 /// A garbage collected pointer. 'Gc' stands for 'Garbage collected'.
 ///
@@ -179,12 +183,6 @@ impl<T> Clone for Gc<T> {
     }
 }
 
-/// Initialize the garbage collector. This *must* happen before any `Gc<T>`s are
-/// allocated.
-pub fn init(flags: gc::DebugFlags) {
-    unsafe { COLLECTOR = Some(Collector::new(flags)) };
-}
-
 /// Perform a stop-the-world garbage collection. It is not recommended to call
 /// this manually and instead let the collector decide when a collection is
 /// necessary.
@@ -192,7 +190,11 @@ pub fn init(flags: gc::DebugFlags) {
 /// Calling `collect` when you believe that `Gc` managed values are no longer
 /// used is not guaranteed to free those values and should not be relied upon.
 pub fn collect() {
-    unsafe { COLLECTOR.as_mut().unwrap().collect() }
+    COLLECTOR.lock().collect()
+}
+
+pub fn debug_flags(flags: gc::DebugFlags) {
+    COLLECTOR.lock().debug_flags = flags;
 }
 
 /// Provides some useful functions for debugging and testing the collector.
@@ -208,24 +210,23 @@ impl Debug {
     /// a collection: mis-identified integer, floating garbage in the red-zone,
     /// stale pointers in registers etc.
     pub fn is_black<T>(gc: Gc<T>) -> bool {
-        let collector = unsafe { COLLECTOR.as_ref().unwrap() };
-        let cstate = *collector.state.lock().unwrap();
-
         // Checking an object's colour only makes sense immediately after
         // marking has taken place. After a full collection has happened,
         // marking results are stale and the object graph must be re-marked in
         // order for this query to be meaningful.
-        assert!(!collector.debug_flags.sweep_phase);
-        assert_eq!(cstate, gc::CollectorState::Ready);
+        assert!(!COLLECTOR.lock().debug_flags.sweep_phase);
+        assert_eq!(*COLLECTOR_STATE.lock(), gc::CollectorState::Ready);
 
         unsafe {
-            return collector.colour(&*(gc.objptr as *const GcBox<gc::OpaqueU8>))
+            return COLLECTOR
+                .lock()
+                .colour(&*(gc.objptr as *const GcBox<gc::OpaqueU8>))
                 == gc::Colour::Black;
         }
     }
 
     pub unsafe fn keep_alive<T>(gc: Gc<T>) {
-        let collector = COLLECTOR.as_ref().unwrap();
+        let collector = COLLECTOR.lock();
         let boxed = &mut *(gc.objptr as *mut GcBox<gc::OpaqueU8>);
         collector.mark(boxed, gc::Colour::Black);
     }

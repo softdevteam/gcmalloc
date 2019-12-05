@@ -40,7 +40,7 @@ fn make_objgraph() -> Gc<Node> {
 }
 
 fn main() {
-    gcmalloc::init(DebugFlags::new().mark_phase(false));
+    gcmalloc::debug_flags(DebugFlags::new().mark_phase(false));
 
     let a = make_objgraph();
     gcmalloc::collect();
