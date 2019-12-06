@@ -38,6 +38,9 @@ static COLLECTOR: Mutex<Collector> = Mutex::new(Collector::new());
 
 static COLLECTOR_PHASE: Mutex<CollectorPhase> = Mutex::new(CollectorPhase::Ready);
 
+/// The default number of GC values allocated before a collection is triggered.
+const GC_ALLOCATION_THRESHOLD: usize = 100;
+
 /// A garbage collected pointer. 'Gc' stands for 'Garbage collected'.
 ///
 /// The type `Gc<T>` provides shared ownership of a value of type `T`,
@@ -215,6 +218,10 @@ pub fn collect() {
 
 pub fn debug_flags(flags: gc::DebugFlags) {
     COLLECTOR.lock().debug_flags = flags;
+}
+
+pub fn set_threshold(threshold: usize) {
+    COLLECTOR.lock().allocation_threshold = threshold
 }
 
 /// Provides some useful functions for debugging and testing the collector.

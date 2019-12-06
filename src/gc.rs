@@ -1,6 +1,6 @@
 use crate::{
     alloc::{GcVec, PtrInfo},
-    Colour, GcBox, ALLOCATOR, COLLECTOR_PHASE, GC_ALLOCATOR,
+    Colour, GcBox, ALLOCATOR, COLLECTOR_PHASE, GC_ALLOCATION_THRESHOLD, GC_ALLOCATOR,
 };
 
 use std::{
@@ -64,6 +64,7 @@ pub struct DebugFlags {
     pub prep_phase: bool,
     pub mark_phase: bool,
     pub sweep_phase: bool,
+    pub automatic_collection: bool,
 }
 
 impl DebugFlags {
@@ -72,6 +73,7 @@ impl DebugFlags {
             prep_phase: true,
             mark_phase: true,
             sweep_phase: true,
+            automatic_collection: true,
         }
     }
 
@@ -129,6 +131,12 @@ pub(crate) struct Collector {
     /// Flags used to turn on/off certain collection phases for debugging &
     /// testing purposes.
     pub(crate) debug_flags: DebugFlags,
+
+    /// The number of GC values allocated before a collection is triggered.
+    pub(crate) allocation_threshold: usize,
+
+    /// The number of GC values allocated since the last collection.
+    pub(crate) allocations: usize,
 }
 
 impl Collector {
@@ -137,6 +145,16 @@ impl Collector {
             worklist: GcVec::new(),
             drop_queue: GcVec::new(),
             debug_flags: DebugFlags::new(),
+            allocation_threshold: GC_ALLOCATION_THRESHOLD,
+            allocations: 0,
+        }
+    }
+
+    /// Asks the collector if it needs to collect garbage. If it does, a STW
+    /// collection takes place, before resuming the mutator where it left off.
+    pub(crate) fn poll(&mut self) {
+        if self.debug_flags.automatic_collection && self.allocations >= self.allocation_threshold {
+            self.collect();
         }
     }
 
@@ -163,6 +181,8 @@ impl Collector {
         }
 
         self.enter_drop_phase();
+
+        self.allocations = 0;
 
         COLLECTOR_PHASE.lock().update(CollectorPhase::Ready);
     }
