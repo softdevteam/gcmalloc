@@ -210,11 +210,6 @@ impl Debug {
     /// a collection: mis-identified integer, floating garbage in the red-zone,
     /// stale pointers in registers etc.
     pub fn is_black<T>(gc: Gc<T>) -> bool {
-        // Checking an object's colour only makes sense immediately after
-        // marking has taken place. After a full collection has happened,
-        // marking results are stale and the object graph must be re-marked in
-        // order for this query to be meaningful.
-        assert!(!COLLECTOR.lock().debug_flags.sweep_phase);
         assert_eq!(*COLLECTOR_PHASE.lock(), gc::CollectorPhase::Ready);
 
         unsafe {

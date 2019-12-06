@@ -34,7 +34,7 @@ extern "sysv64" {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum CollectorPhase {
     Ready,
-    RootScanning,
+    Preparation,
     Marking,
     Sweeping,
     Finalization,
@@ -43,8 +43,8 @@ pub(crate) enum CollectorPhase {
 impl CollectorPhase {
     fn update(&mut self, new_phase: CollectorPhase) {
         match (*self, new_phase) {
-            (CollectorPhase::Ready, CollectorPhase::RootScanning) => *self = new_phase,
-            (_, CollectorPhase::RootScanning) => {
+            (CollectorPhase::Ready, CollectorPhase::Preparation) => *self = new_phase,
+            (_, CollectorPhase::Preparation) => {
                 panic!("Invalid GC phase transition: {:?} -> {:?}", self, new_phase)
             }
 
@@ -61,6 +61,7 @@ impl CollectorPhase {
 /// collector.
 #[derive(Debug)]
 pub struct DebugFlags {
+    pub prep_phase: bool,
     pub mark_phase: bool,
     pub sweep_phase: bool,
 }
@@ -68,9 +69,15 @@ pub struct DebugFlags {
 impl DebugFlags {
     pub const fn new() -> Self {
         Self {
+            prep_phase: true,
             mark_phase: true,
             sweep_phase: true,
         }
+    }
+
+    pub fn prep_phase(mut self, val: bool) -> Self {
+        self.prep_phase = val;
+        self
     }
 
     pub fn mark_phase(mut self, val: bool) -> Self {
@@ -122,11 +129,6 @@ pub(crate) struct Collector {
     /// Holds pointers to unreachable objects awaiting destruction.
     drop_queue: GcVec<usize>,
 
-    /// The value of the mark-bit which the collector uses to denote whether an
-    /// object is black (marked). As this can change after each collection, its
-    /// current state needs storing.
-    black: bool,
-
     /// Flags used to turn on/off certain collection phases for debugging &
     /// testing purposes.
     pub(crate) debug_flags: DebugFlags,
@@ -137,7 +139,6 @@ impl Collector {
         Self {
             worklist: GcVec::new(),
             drop_queue: GcVec::new(),
-            black: true,
             debug_flags: DebugFlags::new(),
         }
     }
@@ -146,7 +147,11 @@ impl Collector {
     /// triggered through this method. It is UB to call any of them
     /// individually.
     pub(crate) fn collect(&mut self) {
-        COLLECTOR_PHASE.lock().update(CollectorPhase::RootScanning);
+        if self.debug_flags.prep_phase {
+            self.enter_preparation_phase();
+        }
+
+        COLLECTOR_PHASE.lock().update(CollectorPhase::Marking);
 
         // Register spilling is platform specific. This is implemented in
         // an assembly stub. The fn to scan the stack is passed as a callback
@@ -163,6 +168,17 @@ impl Collector {
         self.enter_drop_phase();
 
         COLLECTOR_PHASE.lock().update(CollectorPhase::Ready);
+    }
+
+    /// The entry-point to the preperation phase.
+    ///
+    /// This sets the mark-bits of all garbage-collected objects to white.
+    fn enter_preparation_phase(&mut self) {
+        COLLECTOR_PHASE.lock().update(CollectorPhase::Preparation);
+        for block in ALLOCATOR.iter().filter(|x| x.gc) {
+            let obj = unsafe { &mut*(block.ptr as *mut GcBox<OpaqueU8>)};
+            obj.set_mark_bit(false);
+        }
     }
 
     /// The entry-point to the mark phase.
@@ -217,14 +233,6 @@ impl Collector {
                 self.drop_queue.push(obj as usize);
             }
         }
-
-        // Flip the meaning of the mark bit, i.e. if false == Black, then it
-        // becomes false == white. This is a simplification which allows us to
-        // avoid resetting the mark bit for every survived object after
-        // collection. Since we do not implement a marking bitmap and instead
-        // store this mark bit in each object header, this would be a very
-        // expensive operation.
-        self.black = !self.black;
     }
 
     /// The entry-point to the drop phase.
@@ -293,7 +301,7 @@ impl Collector {
     }
 
     pub(crate) fn colour(&self, obj: &GcBox<OpaqueU8>) -> Colour {
-        if obj.metadata().mark_bit == self.black {
+        if obj.metadata().mark_bit == true {
             Colour::Black
         } else {
             Colour::White
@@ -302,8 +310,8 @@ impl Collector {
 
     pub(crate) fn mark(&self, obj: &mut GcBox<OpaqueU8>, colour: Colour) {
         match colour {
-            Colour::Black => obj.set_mark_bit(self.black),
-            Colour::White => obj.set_mark_bit(!self.black),
+            Colour::Black => obj.set_mark_bit(true),
+            Colour::White => obj.set_mark_bit(false),
         };
     }
 }
