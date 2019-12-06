@@ -102,21 +102,26 @@ pub(crate) enum Colour {
 /// A collector responsible for finding and freeing unreachable objects.
 ///
 /// It is implemented as a stop-the-world, conservative, mark-sweep GC. A full
-/// collection can broken down into 3 distinct phases:
+/// collection can broken down into 4 distinct phases:
 ///
-/// 1) Stack Scanning - Upon entry to a collection, callee-save registers are
-///    spilled to the call stack and it is scanned looking for on-heap-pointers.
-///    If found, on-heap-pointers are added to the marking worklist ready for
-///    the next phase.
+/// 1) Preparation Phase - A single pass over the heap is performed where the
+///    mark-bit of each GC object is cleared, indicating that they are
+///    potentially unreachable.
 ///
-/// 2) Mark phase - Each allocation block in the marking worklist is traced in
-///    search of further on-heap-pointers. Allocation blocks which contain GC
-///    objects are marked black. All blocks, regardless of memory management
-///    strategy, are traced in search of further on-heap-pointers. This process
-///    is repeated until the worklist is empty.
+/// 2) Mark phase - A transitive closure over the object graph is performed to
+///    determine which garbage-collected objects are reachable. This is started
+///    from on-stack and in-value registers at the time of collection - known as
+///    the root-set. All potential pointers - regardless of memory management
+///    strategy - are traced in search of further on-heap-pointers. Once
+///    reached, garbage-collected objects are marked *black* to denote that they
+///    are reachable.
 ///
-/// 3) Sweep phase - All GC objects which were not marked black in the mark
-///    phase are deallocated as they are considered unreachable.
+/// 3) Sweep phase - The heap is scanned for all white garbage-collected
+///    objects, which, when found, are added to the drop_queue to be finalized
+///    and deallocated.
+///
+/// 4) Finalization phase - Each white object in the drop queue is finalized,
+///    before having its memory deallocated.
 ///
 /// During a collection, each phase is run consecutively and requires all
 /// mutator threads to come to a complete stop.
