@@ -124,10 +124,22 @@ impl<T> GcBox<T> {
         }
     }
 
-    pub(crate) fn set_mark_bit(&mut self, value: bool) {
+    pub(crate) fn set_colour(&mut self, colour: Colour) {
         let mut metadata = self.metadata();
-        metadata.mark_bit = value.into();
+        match colour {
+            Colour::Black => metadata.mark_bit = true,
+            Colour::White => metadata.mark_bit = false,
+        }
         self.set_metadata(metadata);
+    }
+
+    pub(crate) fn colour(&self) -> Colour {
+        let metadata = self.metadata();
+        if metadata.mark_bit {
+            Colour::Black
+        } else {
+            Colour::White
+        }
     }
 
     pub(crate) fn set_dropped(&mut self, value: bool) {
@@ -164,7 +176,7 @@ impl<T> DerefMut for Gc<T> {
 
 impl<T> Drop for GcBox<T> {
     fn drop(&mut self) {
-        if self.metadata().mark_bit || self.metadata().dropped {
+        if self.colour() == Colour::Black || self.metadata().dropped {
             return;
         }
         self.set_dropped(true);
@@ -181,6 +193,14 @@ impl<T> Clone for Gc<T> {
     fn clone(&self) -> Self {
         *self
     }
+}
+
+/// Colour of an object used during marking phase (see Dijkstra tri-colour
+/// abstraction)
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+pub(crate) enum Colour {
+    Black,
+    White,
 }
 
 /// Perform a stop-the-world garbage collection. It is not recommended to call
@@ -212,17 +232,12 @@ impl Debug {
     pub fn is_black<T>(gc: Gc<T>) -> bool {
         assert_eq!(*COLLECTOR_PHASE.lock(), gc::CollectorPhase::Ready);
 
-        unsafe {
-            return COLLECTOR
-                .lock()
-                .colour(&*(gc.objptr as *const GcBox<gc::OpaqueU8>))
-                == gc::Colour::Black;
-        }
+        let obj = unsafe { &*(gc.objptr as *const GcBox<gc::OpaqueU8>) };
+        obj.colour() == Colour::Black
     }
 
     pub unsafe fn keep_alive<T>(gc: Gc<T>) {
-        let collector = COLLECTOR.lock();
-        let boxed = &mut *(gc.objptr as *mut GcBox<gc::OpaqueU8>);
-        collector.mark(boxed, gc::Colour::Black);
+        let obj = &mut *(gc.objptr as *mut GcBox<gc::OpaqueU8>);
+        obj.set_colour(Colour::Black)
     }
 }

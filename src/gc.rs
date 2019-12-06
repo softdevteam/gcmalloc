@@ -1,6 +1,6 @@
 use crate::{
     alloc::{GcVec, PtrInfo},
-    GcBox, ALLOCATOR, COLLECTOR_PHASE, GC_ALLOCATOR,
+    Colour, GcBox, ALLOCATOR, COLLECTOR_PHASE, GC_ALLOCATOR,
 };
 
 use std::{
@@ -91,14 +91,6 @@ impl DebugFlags {
     }
 }
 
-/// Colour of an object used during marking phase (see Dijkstra tri-colour
-/// abstraction)
-#[derive(PartialEq, Eq)]
-pub(crate) enum Colour {
-    Black,
-    White,
-}
-
 /// A collector responsible for finding and freeing unreachable objects.
 ///
 /// It is implemented as a stop-the-world, conservative, mark-sweep GC. A full
@@ -181,8 +173,8 @@ impl Collector {
     fn enter_preparation_phase(&mut self) {
         COLLECTOR_PHASE.lock().update(CollectorPhase::Preparation);
         for block in ALLOCATOR.iter().filter(|x| x.gc) {
-            let obj = unsafe { &mut*(block.ptr as *mut GcBox<OpaqueU8>)};
-            obj.set_mark_bit(false);
+            let obj = unsafe { &mut *(block.ptr as *mut GcBox<OpaqueU8>) };
+            obj.set_colour(Colour::White);
         }
     }
 
@@ -202,10 +194,10 @@ impl Collector {
 
             if gc {
                 let obj = unsafe { &mut *(ptr as *mut GcBox<OpaqueU8>) };
-                if self.colour(obj) == Colour::Black {
+                if obj.colour() == Colour::Black {
                     continue;
                 }
-                self.mark(obj, Colour::Black);
+                obj.set_colour(Colour::Black);
             }
 
             // Check each word in the allocation block for pointers.
@@ -233,9 +225,10 @@ impl Collector {
         COLLECTOR_PHASE.lock().update(CollectorPhase::Sweeping);
 
         for block in ALLOCATOR.iter().filter(|x| x.gc) {
-            let obj = block.ptr as *mut GcBox<OpaqueU8>;
-            if self.colour(unsafe { &*obj }) == Colour::White {
-                self.drop_queue.push(obj as usize);
+            let obj = unsafe { &*(block.ptr as *mut GcBox<OpaqueU8>) };
+            if obj.colour() == Colour::White {
+                self.drop_queue
+                    .push(obj as *const GcBox<OpaqueU8> as *const u8 as usize);
             }
         }
     }
@@ -303,21 +296,6 @@ impl Collector {
                 self.worklist.push(block);
             }
         }
-    }
-
-    pub(crate) fn colour(&self, obj: &GcBox<OpaqueU8>) -> Colour {
-        if obj.metadata().mark_bit == true {
-            Colour::Black
-        } else {
-            Colour::White
-        }
-    }
-
-    pub(crate) fn mark(&self, obj: &mut GcBox<OpaqueU8>, colour: Colour) {
-        match colour {
-            Colour::Black => obj.set_mark_bit(true),
-            Colour::White => obj.set_mark_bit(false),
-        };
     }
 }
 
