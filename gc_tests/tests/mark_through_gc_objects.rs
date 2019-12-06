@@ -40,7 +40,7 @@ fn make_objgraph() -> Box<OnRustHeap> {
 }
 
 fn main() {
-    gcmalloc::init(DebugFlags::new().sweep_phase(false));
+    gcmalloc::debug_flags(DebugFlags::new().sweep_phase(false));
 
     let objgraph = make_objgraph();
     gcmalloc::collect();

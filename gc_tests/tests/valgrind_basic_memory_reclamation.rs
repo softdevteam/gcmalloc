@@ -25,7 +25,7 @@ struct S {
 }
 
 fn main() {
-    gcmalloc::init(DebugFlags::new().mark_phase(false));
+    gcmalloc::debug_flags(DebugFlags::new().mark_phase(false));
 
     let x = Gc::new(123 as usize);
     let y = Gc::new(S { a: 10, b: 20} );

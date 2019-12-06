@@ -1,13 +1,12 @@
 use crate::{
     alloc::{GcVec, PtrInfo},
-    GcBox, ALLOCATOR, GC_ALLOCATOR,
+    GcBox, ALLOCATOR, COLLECTOR_STATE, GC_ALLOCATOR,
 };
 
 use std::{
     alloc::{Alloc, Layout},
     mem::{align_of_val, size_of_val, transmute},
     ptr::NonNull,
-    sync::Mutex,
 };
 
 static WORD_SIZE: usize = std::mem::size_of::<usize>(); // in bytes
@@ -41,18 +40,33 @@ pub(crate) enum CollectorState {
     Finalization,
 }
 
+impl CollectorState {
+    fn update(&mut self, new_state: CollectorState) {
+        match (*self, new_state) {
+            (CollectorState::Ready, CollectorState::RootScanning) => *self = new_state,
+            (_, CollectorState::RootScanning) => {
+                panic!("Invalid GC state transition: {:?} -> {:?}", self, new_state)
+            }
+
+            (_, _) => *self = new_state,
+        }
+        *self = new_state
+    }
+}
+
 /// Flags which affect the garbage collector's behaviour. They are useful for
 /// isolating certain phases of a collection for testing or debugging purposes.
 ///
 /// The flags are passed to the `init` function which initializes the
 /// collector.
+#[derive(Debug)]
 pub struct DebugFlags {
     pub mark_phase: bool,
     pub sweep_phase: bool,
 }
 
 impl DebugFlags {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             mark_phase: true,
             sweep_phase: true,
@@ -105,8 +119,8 @@ pub(crate) struct Collector {
     /// phase is complete, and the full object-graph has been traversed.
     worklist: GcVec<PtrInfo>,
 
-    /// Holds unreachable objects awaiting destruction.
-    drop_queue: GcVec<*mut GcBox<OpaqueU8>>,
+    /// Holds pointers to unreachable objects awaiting destruction.
+    drop_queue: GcVec<usize>,
 
     /// The value of the mark-bit which the collector uses to denote whether an
     /// object is black (marked). As this can change after each collection, its
@@ -116,20 +130,15 @@ pub(crate) struct Collector {
     /// Flags used to turn on/off certain collection phases for debugging &
     /// testing purposes.
     pub(crate) debug_flags: DebugFlags,
-
-    /// The current state that the collector is in. Some operations can only be
-    /// performed in specific states.
-    pub(crate) state: Mutex<CollectorState>,
 }
 
 impl Collector {
-    pub(crate) fn new(debug_flags: DebugFlags) -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             worklist: GcVec::new(),
             drop_queue: GcVec::new(),
             black: true,
-            debug_flags,
-            state: Mutex::new(CollectorState::Ready),
+            debug_flags: DebugFlags::new(),
         }
     }
 
@@ -137,17 +146,7 @@ impl Collector {
     /// triggered through this method. It is UB to call any of them
     /// individually.
     pub(crate) fn collect(&mut self) {
-        // First check that no call to collect is active
-        {
-            let mut cstate = self.state.lock().unwrap();
-            match *cstate {
-                CollectorState::Ready => *cstate = CollectorState::RootScanning,
-                _ => {
-                    // The collector is running on another thread.
-                    return;
-                }
-            }
-        }
+        COLLECTOR_STATE.lock().update(CollectorState::RootScanning);
 
         // Register spilling is platform specific. This is implemented in
         // an assembly stub. The fn to scan the stack is passed as a callback
@@ -163,7 +162,7 @@ impl Collector {
 
         self.enter_drop_phase();
 
-        *self.state.lock().unwrap() = CollectorState::Ready;
+        COLLECTOR_STATE.lock().update(CollectorState::Ready);
     }
 
     /// The entry-point to the mark phase.
@@ -175,7 +174,7 @@ impl Collector {
     /// collector. It also traverses the contents of **all** blocks for further
     /// pointers.
     fn enter_mark_phase(&mut self) {
-        *self.state.lock().unwrap() = CollectorState::Marking;
+        COLLECTOR_STATE.lock().update(CollectorState::Marking);
 
         while !self.worklist.is_empty() {
             let PtrInfo { ptr, size, gc } = self.worklist.pop().unwrap();
@@ -210,12 +209,12 @@ impl Collector {
     /// If this method is called without the marking phase being called first,
     /// then all gc-managed objects are presumed dead and deallocated.
     fn enter_sweep_phase(&mut self) {
-        *self.state.lock().unwrap() = CollectorState::Sweeping;
+        COLLECTOR_STATE.lock().update(CollectorState::Sweeping);
 
         for block in ALLOCATOR.iter().filter(|x| x.gc) {
             let obj = block.ptr as *mut GcBox<OpaqueU8>;
             if self.colour(unsafe { &*obj }) == Colour::White {
-                self.drop_queue.push(obj);
+                self.drop_queue.push(obj as usize);
             }
         }
 
@@ -236,15 +235,16 @@ impl Collector {
     /// cycles between `Gc` objects, no guarantees are made about which
     /// destructor is ran first.
     fn enter_drop_phase(&mut self) {
-        *self.state.lock().unwrap() = CollectorState::Finalization;
+        COLLECTOR_STATE.lock().update(CollectorState::Finalization);
 
-        for boxptr in self.drop_queue.iter() {
+        for i in self.drop_queue.iter().cloned() {
+            let boxptr = i as *mut GcBox<OpaqueU8>;
             unsafe {
-                let vptr = (&mut **boxptr).drop_vptr();
-                let fatptr: &mut dyn Drop = transmute((*boxptr, vptr));
+                let vptr = (&*boxptr).drop_vptr();
+                let fatptr: &mut dyn Drop = transmute((boxptr, vptr));
                 ::std::ptr::drop_in_place(fatptr);
             }
-            self.dealloc(*boxptr);
+            self.dealloc(boxptr);
         }
 
         self.drop_queue = GcVec::new()
@@ -267,7 +267,8 @@ impl Collector {
 
         unsafe {
             let layout = Layout::from_size_align_unchecked(size, align);
-            GC_ALLOCATOR.dealloc(NonNull::new_unchecked(boxptr as *mut u8), layout);
+            let ptr = boxptr as *mut GcBox<OpaqueU8> as *mut u8;
+            GC_ALLOCATOR.dealloc(NonNull::new_unchecked(ptr), layout);
         }
     }
 
