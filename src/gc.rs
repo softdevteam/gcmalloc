@@ -1,6 +1,6 @@
 use crate::{
     alloc::{GcVec, PtrInfo},
-    GcBox, ALLOCATOR, COLLECTOR_STATE, GC_ALLOCATOR,
+    Colour, GcBox, ALLOCATOR, COLLECTOR_PHASE, GC_ALLOCATOR,
 };
 
 use std::{
@@ -30,27 +30,27 @@ extern "sysv64" {
     fn spill_registers(collector: *mut u8, callback: StackScanCallback);
 }
 
-/// Used to denote which state the collector is in at a given point in time.
+/// Used to denote which phase the collector is in at a given point in time.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub(crate) enum CollectorState {
+pub(crate) enum CollectorPhase {
     Ready,
-    RootScanning,
+    Preparation,
     Marking,
     Sweeping,
     Finalization,
 }
 
-impl CollectorState {
-    fn update(&mut self, new_state: CollectorState) {
-        match (*self, new_state) {
-            (CollectorState::Ready, CollectorState::RootScanning) => *self = new_state,
-            (_, CollectorState::RootScanning) => {
-                panic!("Invalid GC state transition: {:?} -> {:?}", self, new_state)
+impl CollectorPhase {
+    fn update(&mut self, new_phase: CollectorPhase) {
+        match (*self, new_phase) {
+            (CollectorPhase::Ready, CollectorPhase::Preparation) => *self = new_phase,
+            (_, CollectorPhase::Preparation) => {
+                panic!("Invalid GC phase transition: {:?} -> {:?}", self, new_phase)
             }
 
-            (_, _) => *self = new_state,
+            (_, _) => *self = new_phase,
         }
-        *self = new_state
+        *self = new_phase
     }
 }
 
@@ -61,6 +61,7 @@ impl CollectorState {
 /// collector.
 #[derive(Debug)]
 pub struct DebugFlags {
+    pub prep_phase: bool,
     pub mark_phase: bool,
     pub sweep_phase: bool,
 }
@@ -68,9 +69,15 @@ pub struct DebugFlags {
 impl DebugFlags {
     pub const fn new() -> Self {
         Self {
+            prep_phase: true,
             mark_phase: true,
             sweep_phase: true,
         }
+    }
+
+    pub fn prep_phase(mut self, val: bool) -> Self {
+        self.prep_phase = val;
+        self
     }
 
     pub fn mark_phase(mut self, val: bool) -> Self {
@@ -84,32 +91,29 @@ impl DebugFlags {
     }
 }
 
-/// Colour of an object used during marking phase (see Dijkstra tri-colour
-/// abstraction)
-#[derive(PartialEq, Eq)]
-pub(crate) enum Colour {
-    Black,
-    White,
-}
-
 /// A collector responsible for finding and freeing unreachable objects.
 ///
 /// It is implemented as a stop-the-world, conservative, mark-sweep GC. A full
-/// collection can broken down into 3 distinct phases:
+/// collection can broken down into 4 distinct phases:
 ///
-/// 1) Stack Scanning - Upon entry to a collection, callee-save registers are
-///    spilled to the call stack and it is scanned looking for on-heap-pointers.
-///    If found, on-heap-pointers are added to the marking worklist ready for
-///    the next phase.
+/// 1) Preparation Phase - A single pass over the heap is performed where the
+///    mark-bit of each GC object is cleared, indicating that they are
+///    potentially unreachable.
 ///
-/// 2) Mark phase - Each allocation block in the marking worklist is traced in
-///    search of further on-heap-pointers. Allocation blocks which contain GC
-///    objects are marked black. All blocks, regardless of memory management
-///    strategy, are traced in search of further on-heap-pointers. This process
-///    is repeated until the worklist is empty.
+/// 2) Mark phase - A transitive closure over the object graph is performed to
+///    determine which garbage-collected objects are reachable. This is started
+///    from on-stack and in-value registers at the time of collection - known as
+///    the root-set. All potential pointers - regardless of memory management
+///    strategy - are traced in search of further on-heap-pointers. Once
+///    reached, garbage-collected objects are marked *black* to denote that they
+///    are reachable.
 ///
-/// 3) Sweep phase - All GC objects which were not marked black in the mark
-///    phase are deallocated as they are considered unreachable.
+/// 3) Sweep phase - The heap is scanned for all white garbage-collected
+///    objects, which, when found, are added to the drop_queue to be finalized
+///    and deallocated.
+///
+/// 4) Finalization phase - Each white object in the drop queue is finalized,
+///    before having its memory deallocated.
 ///
 /// During a collection, each phase is run consecutively and requires all
 /// mutator threads to come to a complete stop.
@@ -122,11 +126,6 @@ pub(crate) struct Collector {
     /// Holds pointers to unreachable objects awaiting destruction.
     drop_queue: GcVec<usize>,
 
-    /// The value of the mark-bit which the collector uses to denote whether an
-    /// object is black (marked). As this can change after each collection, its
-    /// current state needs storing.
-    black: bool,
-
     /// Flags used to turn on/off certain collection phases for debugging &
     /// testing purposes.
     pub(crate) debug_flags: DebugFlags,
@@ -137,7 +136,6 @@ impl Collector {
         Self {
             worklist: GcVec::new(),
             drop_queue: GcVec::new(),
-            black: true,
             debug_flags: DebugFlags::new(),
         }
     }
@@ -146,7 +144,11 @@ impl Collector {
     /// triggered through this method. It is UB to call any of them
     /// individually.
     pub(crate) fn collect(&mut self) {
-        COLLECTOR_STATE.lock().update(CollectorState::RootScanning);
+        if self.debug_flags.prep_phase {
+            self.enter_preparation_phase();
+        }
+
+        COLLECTOR_PHASE.lock().update(CollectorPhase::Marking);
 
         // Register spilling is platform specific. This is implemented in
         // an assembly stub. The fn to scan the stack is passed as a callback
@@ -162,7 +164,18 @@ impl Collector {
 
         self.enter_drop_phase();
 
-        COLLECTOR_STATE.lock().update(CollectorState::Ready);
+        COLLECTOR_PHASE.lock().update(CollectorPhase::Ready);
+    }
+
+    /// The entry-point to the preperation phase.
+    ///
+    /// This sets the mark-bits of all garbage-collected objects to white.
+    fn enter_preparation_phase(&mut self) {
+        COLLECTOR_PHASE.lock().update(CollectorPhase::Preparation);
+        for block in ALLOCATOR.iter().filter(|x| x.gc) {
+            let obj = unsafe { &mut *(block.ptr as *mut GcBox<OpaqueU8>) };
+            obj.set_colour(Colour::White);
+        }
     }
 
     /// The entry-point to the mark phase.
@@ -174,17 +187,17 @@ impl Collector {
     /// collector. It also traverses the contents of **all** blocks for further
     /// pointers.
     fn enter_mark_phase(&mut self) {
-        COLLECTOR_STATE.lock().update(CollectorState::Marking);
+        COLLECTOR_PHASE.lock().update(CollectorPhase::Marking);
 
         while !self.worklist.is_empty() {
             let PtrInfo { ptr, size, gc } = self.worklist.pop().unwrap();
 
             if gc {
                 let obj = unsafe { &mut *(ptr as *mut GcBox<OpaqueU8>) };
-                if self.colour(obj) == Colour::Black {
+                if obj.colour() == Colour::Black {
                     continue;
                 }
-                self.mark(obj, Colour::Black);
+                obj.set_colour(Colour::Black);
             }
 
             // Check each word in the allocation block for pointers.
@@ -209,22 +222,15 @@ impl Collector {
     /// If this method is called without the marking phase being called first,
     /// then all gc-managed objects are presumed dead and deallocated.
     fn enter_sweep_phase(&mut self) {
-        COLLECTOR_STATE.lock().update(CollectorState::Sweeping);
+        COLLECTOR_PHASE.lock().update(CollectorPhase::Sweeping);
 
         for block in ALLOCATOR.iter().filter(|x| x.gc) {
-            let obj = block.ptr as *mut GcBox<OpaqueU8>;
-            if self.colour(unsafe { &*obj }) == Colour::White {
-                self.drop_queue.push(obj as usize);
+            let obj = unsafe { &*(block.ptr as *mut GcBox<OpaqueU8>) };
+            if obj.colour() == Colour::White {
+                self.drop_queue
+                    .push(obj as *const GcBox<OpaqueU8> as *const u8 as usize);
             }
         }
-
-        // Flip the meaning of the mark bit, i.e. if false == Black, then it
-        // becomes false == white. This is a simplification which allows us to
-        // avoid resetting the mark bit for every survived object after
-        // collection. Since we do not implement a marking bitmap and instead
-        // store this mark bit in each object header, this would be a very
-        // expensive operation.
-        self.black = !self.black;
     }
 
     /// The entry-point to the drop phase.
@@ -235,7 +241,7 @@ impl Collector {
     /// cycles between `Gc` objects, no guarantees are made about which
     /// destructor is ran first.
     fn enter_drop_phase(&mut self) {
-        COLLECTOR_STATE.lock().update(CollectorState::Finalization);
+        COLLECTOR_PHASE.lock().update(CollectorPhase::Finalization);
 
         for i in self.drop_queue.iter().cloned() {
             let boxptr = i as *mut GcBox<OpaqueU8>;
@@ -290,21 +296,6 @@ impl Collector {
                 self.worklist.push(block);
             }
         }
-    }
-
-    pub(crate) fn colour(&self, obj: &GcBox<OpaqueU8>) -> Colour {
-        if obj.metadata().mark_bit == self.black {
-            Colour::Black
-        } else {
-            Colour::White
-        }
-    }
-
-    pub(crate) fn mark(&self, obj: &mut GcBox<OpaqueU8>, colour: Colour) {
-        match colour {
-            Colour::Black => obj.set_mark_bit(self.black),
-            Colour::White => obj.set_mark_bit(!self.black),
-        };
     }
 }
 

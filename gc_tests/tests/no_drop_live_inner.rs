@@ -20,7 +20,7 @@ impl Drop for IncrOnDrop {
 // This tests that if an inner Gc is kept alive from some reference outside a
 // dying outer Gc, the inner destructor should *not* be ran.
 fn main() {
-    gcmalloc::debug_flags(DebugFlags::new().mark_phase(false));
+    gcmalloc::debug_flags(DebugFlags::new().prep_phase(false).mark_phase(false));
 
     let inner = Gc::new(IncrOnDrop(None));
     unsafe { Debug::keep_alive(inner) };

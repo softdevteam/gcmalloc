@@ -127,7 +127,7 @@ const SIZE_BLOCKMETADATA: usize = 16;
 
 #[cfg(not(all(target_pointer_width = "64", target_arch = "x86_64")))]
 compile_error!("Requires x86_64 with 64 bit pointer width.");
-#[derive(PackedStruct, Default, Debug)]
+#[derive(PackedStruct, Debug)]
 #[packed_struct(bit_numbering = "msb0")]
 pub struct BlockMetadata {
     /// The size of the block (excluding its header).
@@ -135,7 +135,7 @@ pub struct BlockMetadata {
     pub(crate) size: Integer<u64, packed_bits::Bits62>,
     #[packed_field(size_bits = "1")]
     pub(crate) is_gc: bool,
-    /// Used by the GC during the marking phase.
+    /// Used by the GC to determine object's reachability.
     #[packed_field(size_bits = "1")]
     pub(crate) mark_bit: bool,
     /// The pointer to the vtable for `Gc<T>`s `Drop` implementation.
