@@ -7,6 +7,8 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+use crate::COLLECTOR;
+
 use packed_struct::prelude::*;
 
 /// A spinlock for keeping allocation thread-safe.
@@ -40,6 +42,11 @@ unsafe impl GlobalAlloc for GlobalAllocator {
 
 unsafe impl Alloc for GcAllocator {
     unsafe fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocErr> {
+        let mut c = COLLECTOR.lock();
+        c.poll();
+        c.allocations += 1;
+        drop(c); // unlock the collector
+
         let p = alloc(layout, true);
         Ok(NonNull::new_unchecked(p))
     }
