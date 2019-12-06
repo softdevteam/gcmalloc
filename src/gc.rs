@@ -1,6 +1,6 @@
 use crate::{
     alloc::{GcVec, PtrInfo},
-    GcBox, ALLOCATOR, COLLECTOR_STATE, GC_ALLOCATOR,
+    GcBox, ALLOCATOR, COLLECTOR_PHASE, GC_ALLOCATOR,
 };
 
 use std::{
@@ -30,9 +30,9 @@ extern "sysv64" {
     fn spill_registers(collector: *mut u8, callback: StackScanCallback);
 }
 
-/// Used to denote which state the collector is in at a given point in time.
+/// Used to denote which phase the collector is in at a given point in time.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub(crate) enum CollectorState {
+pub(crate) enum CollectorPhase {
     Ready,
     RootScanning,
     Marking,
@@ -40,17 +40,17 @@ pub(crate) enum CollectorState {
     Finalization,
 }
 
-impl CollectorState {
-    fn update(&mut self, new_state: CollectorState) {
-        match (*self, new_state) {
-            (CollectorState::Ready, CollectorState::RootScanning) => *self = new_state,
-            (_, CollectorState::RootScanning) => {
-                panic!("Invalid GC state transition: {:?} -> {:?}", self, new_state)
+impl CollectorPhase {
+    fn update(&mut self, new_phase: CollectorPhase) {
+        match (*self, new_phase) {
+            (CollectorPhase::Ready, CollectorPhase::RootScanning) => *self = new_phase,
+            (_, CollectorPhase::RootScanning) => {
+                panic!("Invalid GC phase transition: {:?} -> {:?}", self, new_phase)
             }
 
-            (_, _) => *self = new_state,
+            (_, _) => *self = new_phase,
         }
-        *self = new_state
+        *self = new_phase
     }
 }
 
@@ -146,7 +146,7 @@ impl Collector {
     /// triggered through this method. It is UB to call any of them
     /// individually.
     pub(crate) fn collect(&mut self) {
-        COLLECTOR_STATE.lock().update(CollectorState::RootScanning);
+        COLLECTOR_PHASE.lock().update(CollectorPhase::RootScanning);
 
         // Register spilling is platform specific. This is implemented in
         // an assembly stub. The fn to scan the stack is passed as a callback
@@ -162,7 +162,7 @@ impl Collector {
 
         self.enter_drop_phase();
 
-        COLLECTOR_STATE.lock().update(CollectorState::Ready);
+        COLLECTOR_PHASE.lock().update(CollectorPhase::Ready);
     }
 
     /// The entry-point to the mark phase.
@@ -174,7 +174,7 @@ impl Collector {
     /// collector. It also traverses the contents of **all** blocks for further
     /// pointers.
     fn enter_mark_phase(&mut self) {
-        COLLECTOR_STATE.lock().update(CollectorState::Marking);
+        COLLECTOR_PHASE.lock().update(CollectorPhase::Marking);
 
         while !self.worklist.is_empty() {
             let PtrInfo { ptr, size, gc } = self.worklist.pop().unwrap();
@@ -209,7 +209,7 @@ impl Collector {
     /// If this method is called without the marking phase being called first,
     /// then all gc-managed objects are presumed dead and deallocated.
     fn enter_sweep_phase(&mut self) {
-        COLLECTOR_STATE.lock().update(CollectorState::Sweeping);
+        COLLECTOR_PHASE.lock().update(CollectorPhase::Sweeping);
 
         for block in ALLOCATOR.iter().filter(|x| x.gc) {
             let obj = block.ptr as *mut GcBox<OpaqueU8>;
@@ -235,7 +235,7 @@ impl Collector {
     /// cycles between `Gc` objects, no guarantees are made about which
     /// destructor is ran first.
     fn enter_drop_phase(&mut self) {
-        COLLECTOR_STATE.lock().update(CollectorState::Finalization);
+        COLLECTOR_PHASE.lock().update(CollectorPhase::Finalization);
 
         for i in self.drop_queue.iter().cloned() {
             let boxptr = i as *mut GcBox<OpaqueU8>;

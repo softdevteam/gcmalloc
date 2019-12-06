@@ -19,7 +19,7 @@ pub mod gc;
 
 use crate::{
     alloc::{BlockHeader, BlockMetadata, GcAllocator, GlobalAllocator},
-    gc::{Collector, CollectorState},
+    gc::{Collector, CollectorPhase},
 };
 use std::{
     alloc::{Alloc, Layout},
@@ -36,7 +36,7 @@ static mut GC_ALLOCATOR: GcAllocator = GcAllocator;
 
 static COLLECTOR: Mutex<Collector> = Mutex::new(Collector::new());
 
-static COLLECTOR_STATE: Mutex<CollectorState> = Mutex::new(CollectorState::Ready);
+static COLLECTOR_PHASE: Mutex<CollectorPhase> = Mutex::new(CollectorPhase::Ready);
 
 /// A garbage collected pointer. 'Gc' stands for 'Garbage collected'.
 ///
@@ -215,7 +215,7 @@ impl Debug {
         // marking results are stale and the object graph must be re-marked in
         // order for this query to be meaningful.
         assert!(!COLLECTOR.lock().debug_flags.sweep_phase);
-        assert_eq!(*COLLECTOR_STATE.lock(), gc::CollectorState::Ready);
+        assert_eq!(*COLLECTOR_PHASE.lock(), gc::CollectorPhase::Ready);
 
         unsafe {
             return COLLECTOR
