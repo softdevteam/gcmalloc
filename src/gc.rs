@@ -223,13 +223,7 @@ impl Collector {
             // Check each word in the allocation block for pointers.
             for addr in (ptr..ptr + size).step_by(WORD_SIZE) {
                 let word = unsafe { *(addr as *const Word) };
-
-                if let Some(block) = ALLOCATOR
-                    .iter()
-                    .find(|x| x.ptr == word || word > x.ptr && word < x.ptr + x.size)
-                {
-                    self.worklist.push(block)
-                }
+                self.check_pointer(word);
             }
         }
     }
@@ -309,12 +303,16 @@ impl Collector {
 
         for stack_address in (rsp..stack_top).step_by(WORD_SIZE) {
             let stack_word = unsafe { *(stack_address as *const Word) };
-            if let Some(block) = ALLOCATOR
-                .iter()
-                .find(|x| x.ptr == stack_word || stack_word > x.ptr && stack_word < x.ptr + x.size)
-            {
-                self.worklist.push(block);
-            }
+            self.check_pointer(stack_word)
+        }
+    }
+
+    fn check_pointer(&mut self, word: Word) {
+        if let Some(block) = ALLOCATOR
+            .iter()
+            .find(|x| x.ptr == word || word > x.ptr && word < x.ptr + x.size)
+        {
+            self.worklist.push(block);
         }
     }
 }

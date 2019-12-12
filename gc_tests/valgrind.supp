@@ -2,12 +2,6 @@
    <uninitialized_stack>
    Memcheck:Cond
    ...
-   fun:scan_stack
+   fun:_ZN8gcmalloc2gc9Collector13check_pointer*
 }
 
-{
-   <insert_a_suppression_name_here>
-   Memcheck:Cond
-   fun:_ZN8gcmalloc2gc9Collector16enter_mark_phase*
-   ...
-}
