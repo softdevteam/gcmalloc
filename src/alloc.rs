@@ -23,6 +23,8 @@ static ALLOC_LOCK: AllocLock = AllocLock::new();
 
 static mut LAST_ALLOCED: *mut BlockHeader = ::std::ptr::null_mut();
 
+pub static mut HEAP_TOP: usize = 0;
+
 pub struct GlobalAllocator;
 pub struct GcAllocator;
 
@@ -78,6 +80,11 @@ unsafe fn alloc(layout: Layout, is_gc: bool) -> *mut u8 {
     ::std::ptr::write(headerptr, header);
     LAST_ALLOCED = headerptr;
 
+    let top = p.add(layout.size());
+    if top as usize > HEAP_TOP {
+        HEAP_TOP = top as usize;
+    }
+
     ALLOC_LOCK.unlock();
     p
 }
@@ -115,6 +122,12 @@ unsafe fn realloc(ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
     BlockHeader::patch_next(header.prev, new_hp);
     BlockHeader::patch_prev(header.next, new_hp);
     ptr::write(new_hp, header);
+
+    // Max heap boundary
+    let top = p.add(layout.size());
+    if top as usize > HEAP_TOP {
+        HEAP_TOP = top as usize;
+    }
 
     if old_hp == LAST_ALLOCED {
         LAST_ALLOCED = new_hp

@@ -137,6 +137,12 @@ pub(crate) struct Collector {
 
     /// The number of GC values allocated since the last collection.
     pub(crate) allocations: usize,
+
+    /// The data segment houses statics and consts, the former can contain roots
+    /// so the entire segment needs scanning during collection. The range bounds
+    /// are always word aligned addresses from low to high.
+    data_segment_start: usize,
+    data_segment_end: usize,
 }
 
 impl Collector {
@@ -147,6 +153,9 @@ impl Collector {
             debug_flags: DebugFlags::new(),
             allocation_threshold: GC_ALLOCATION_THRESHOLD,
             allocations: 0,
+
+            data_segment_start: 0,
+            data_segment_end: 0,
         }
     }
 
@@ -166,11 +175,19 @@ impl Collector {
             self.enter_preparation_phase();
         }
 
+        if self.data_segment_start == 0 || self.data_segment_end == 0 {
+            let (s, e) = unsafe { get_data_segment_range() };
+            self.data_segment_start = s;
+            self.data_segment_end = e;
+        }
+
         COLLECTOR_PHASE.lock().update(CollectorPhase::Marking);
 
         // Register spilling is platform specific. This is implemented in
         // an assembly stub. The fn to scan the stack is passed as a callback
         unsafe { spill_registers(self as *mut Collector as *mut u8, Collector::scan_stack) }
+
+        self.scan_statics();
 
         if self.debug_flags.mark_phase {
             self.enter_mark_phase();
@@ -223,13 +240,7 @@ impl Collector {
             // Check each word in the allocation block for pointers.
             for addr in (ptr..ptr + size).step_by(WORD_SIZE) {
                 let word = unsafe { *(addr as *const Word) };
-
-                if let Some(block) = ALLOCATOR
-                    .iter()
-                    .find(|x| x.ptr == word || word > x.ptr && word < x.ptr + x.size)
-                {
-                    self.worklist.push(block)
-                }
+                self.check_pointer(word);
             }
         }
     }
@@ -309,9 +320,27 @@ impl Collector {
 
         for stack_address in (rsp..stack_top).step_by(WORD_SIZE) {
             let stack_word = unsafe { *(stack_address as *const Word) };
+            self.check_pointer(stack_word)
+        }
+    }
+
+    /// Roots can hide inside static variables, so these need scanning for
+    /// potential pointers too.
+    #[cfg(target_os = "linux")]
+    fn scan_statics(&mut self) {
+        for data_addr in (self.data_segment_start..self.data_segment_end).step_by(WORD_SIZE) {
+            let static_word = unsafe { *(data_addr as *const Word) };
+            self.check_pointer(static_word);
+        }
+    }
+
+    fn check_pointer(&mut self, word: Word) {
+        // Since the heap starts at the end of the data segment, we can use this
+        // as the lower heap bound.
+        if word >= self.data_segment_end && word < unsafe { crate::alloc::HEAP_TOP } {
             if let Some(block) = ALLOCATOR
                 .iter()
-                .find(|x| x.ptr == stack_word || stack_word > x.ptr && stack_word < x.ptr + x.size)
+                .find(|x| x.ptr == word || word > x.ptr && word < x.ptr + x.size)
             {
                 self.worklist.push(block);
             }
@@ -339,4 +368,25 @@ unsafe fn get_stack_start() -> Option<Address> {
         0
     );
     return Some((stackaddr as usize + stacksize) as Address);
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn get_data_segment_range() -> (usize, usize) {
+    extern "C" {
+        static __data_start: libc::c_int;
+        static end: libc::c_int;
+    }
+
+    // On some platforms, __data_start is not available. It's not possible to
+    // switch this with __etext without including a custom SIGSEGV handler as
+    // there may be unmapped pages between _etext and _end which we would hit
+    // when scanning.
+    let s = &__data_start as *const _ as *const u8;
+    let start = s.add(s.align_offset(WORD_SIZE)) as usize;
+
+    // On most Unix systems, _end is a symbol included by the linker which
+    // points to the first address past the .bss segment
+    let end_ = &end as *const _ as usize;
+
+    (start, end_)
 }
