@@ -175,6 +175,12 @@ impl Collector {
             self.enter_preparation_phase();
         }
 
+        if self.data_segment_start == 0 || self.data_segment_end == 0 {
+            let (s, e) = unsafe { get_data_segment_range() };
+            self.data_segment_start = s;
+            self.data_segment_end = e;
+        }
+
         COLLECTOR_PHASE.lock().update(CollectorPhase::Marking);
 
         // Register spilling is platform specific. This is implemented in
@@ -329,11 +335,15 @@ impl Collector {
     }
 
     fn check_pointer(&mut self, word: Word) {
-        if let Some(block) = ALLOCATOR
-            .iter()
-            .find(|x| x.ptr == word || word > x.ptr && word < x.ptr + x.size)
-        {
-            self.worklist.push(block);
+        // Since the heap starts at the end of the data segment, we can use this
+        // as the lower heap bound.
+        if word >= self.data_segment_end && word < unsafe { crate::alloc::HEAP_TOP } {
+            if let Some(block) = ALLOCATOR
+                .iter()
+                .find(|x| x.ptr == word || word > x.ptr && word < x.ptr + x.size)
+            {
+                self.worklist.push(block);
+            }
         }
     }
 }
