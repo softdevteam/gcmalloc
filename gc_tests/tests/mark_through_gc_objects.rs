@@ -48,6 +48,6 @@ fn main() {
     let x = objgraph.a.unwrap().b;
     let y = objgraph.b;
 
-    assert!(Debug::is_black(x));
-    assert!(Debug::is_black(y));
+    assert!(Debug::is_black(x.as_ptr() as *mut u8));
+    assert!(Debug::is_black(y.as_ptr() as *mut u8));
 }

@@ -24,5 +24,5 @@ fn main() {
     setup_root();
 
     gcmalloc::collect();
-    unsafe {assert!(Debug::is_black(SOME_ROOT.unwrap())) };
+    unsafe {assert!(Debug::is_black(SOME_ROOT.unwrap().as_ptr() as *mut u8)) };
 }

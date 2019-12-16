@@ -236,10 +236,10 @@ impl Debug {
     /// non-deterministic reasons that an unreachable object might still survive
     /// a collection: mis-identified integer, floating garbage in the red-zone,
     /// stale pointers in registers etc.
-    pub fn is_black<T>(gc: Gc<T>) -> bool {
+    pub fn is_black<T>(gc: *mut T) -> bool {
         assert_eq!(*COLLECTOR_PHASE.lock(), gc::CollectorPhase::Ready);
 
-        let obj = unsafe { &*(gc.objptr as *const GcBox<gc::OpaqueU8>) };
+        let obj = unsafe { &*(gc as *const GcBox<gc::OpaqueU8>) };
         obj.colour() == Colour::Black
     }
 

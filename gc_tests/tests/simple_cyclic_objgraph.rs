@@ -39,20 +39,24 @@ fn main() {
 
     // Test a
     assert_eq!(a.data, String::from("a"));
-    assert!(Debug::is_black(a));
+    assert!(Debug::is_black(a.as_ptr() as *mut u8));
 
     // Test b
     assert_eq!(a.edge.unwrap().data, String::from("b"));
-    assert!(Debug::is_black(a.edge.unwrap()));
+    assert!(Debug::is_black(a.edge.unwrap().as_ptr() as *mut u8));
 
     // Test c
     assert_eq!(a.edge.unwrap().edge.unwrap().data, String::from("c"));
-    assert!(Debug::is_black(a.edge.unwrap().edge.unwrap()));
+    assert!(Debug::is_black(
+        a.edge.unwrap().edge.unwrap().as_ptr() as *mut u8
+    ));
 
     // Test c -> a
     assert_eq!(
         a.edge.unwrap().edge.unwrap().edge.unwrap().data,
         String::from("a")
     );
-    assert!(Debug::is_black(a.edge.unwrap().edge.unwrap().edge.unwrap()));
+    assert!(Debug::is_black(
+        a.edge.unwrap().edge.unwrap().edge.unwrap().as_ptr() as *mut u8
+    ));
 }

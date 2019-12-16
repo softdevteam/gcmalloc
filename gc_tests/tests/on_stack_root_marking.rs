@@ -8,7 +8,7 @@ use gcmalloc::{collect, gc::DebugFlags, Debug, Gc};
 fn foo() {
     let y = Gc::new(456 as usize);
     collect();
-    assert!(Debug::is_black(y));
+    assert!(Debug::is_black(y.as_ptr() as *mut u8));
 }
 
 fn main() {
@@ -16,5 +16,5 @@ fn main() {
 
     let x = Gc::new(123 as usize);
     foo(); // triggers a collection
-    assert!(Debug::is_black(x));
+    assert!(Debug::is_black(x.as_ptr() as *mut u8));
 }
