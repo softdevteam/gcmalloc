@@ -337,10 +337,13 @@ impl Collector {
     fn check_pointer(&mut self, word: Word) {
         // Since the heap starts at the end of the data segment, we can use this
         // as the lower heap bound.
-        if word >= self.data_segment_end && word < unsafe { crate::alloc::HEAP_TOP } {
+        if word >= self.data_segment_end && word <= unsafe { crate::alloc::HEAP_TOP } {
             if let Some(block) = ALLOCATOR
                 .iter()
-                .find(|x| x.ptr == word || word > x.ptr && word < x.ptr + x.size)
+                // It's legal to hold a pointer 1 byte past the end of a block,
+                // but we can still use find because this will never over-run
+                // the size of the next block's header.
+                .find(|x| x.ptr == word || word > x.ptr && word <= x.ptr + x.size )
             {
                 self.worklist.push(block);
             }
