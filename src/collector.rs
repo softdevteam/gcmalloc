@@ -1,6 +1,7 @@
 use crate::{
     alloc::{GcVec, PtrInfo},
-    Colour, GcBox, ALLOCATOR, COLLECTOR_PHASE, GC_ALLOCATION_THRESHOLD, GC_ALLOCATOR,
+    gc::{Colour, GcBox},
+    ALLOCATOR, COLLECTOR_PHASE, GC_ALLOCATION_THRESHOLD, GC_ALLOCATOR,
 };
 
 use std::{
