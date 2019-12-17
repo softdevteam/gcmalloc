@@ -81,7 +81,7 @@ impl Debug {
     }
 
     pub unsafe fn keep_alive<T>(gc: Gc<T>) {
-        let obj = &mut *(gc.objptr as *mut GcBox<OpaqueU8>);
+        let obj = &mut *(gc.objptr.as_ptr() as *mut GcBox<OpaqueU8>);
         obj.set_colour(Colour::Black)
     }
 }
