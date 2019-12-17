@@ -17,13 +17,13 @@ extern crate packed_struct;
 extern crate packed_struct_codegen;
 
 pub mod alloc;
-pub mod gc;
+pub mod collector;
 
-pub use gc::DebugFlags;
+pub use collector::DebugFlags;
 
 use crate::{
     alloc::{BlockHeader, BlockMetadata, GcAllocator, GlobalAllocator},
-    gc::{Collector, CollectorPhase},
+    collector::{Collector, CollectorPhase, OpaqueU8},
 };
 use std::{
     alloc::{Alloc, Layout},
@@ -249,14 +249,14 @@ impl Debug {
     /// a collection: mis-identified integer, floating garbage in the red-zone,
     /// stale pointers in registers etc.
     pub fn is_black<T>(gc: *mut T) -> bool {
-        assert_eq!(*COLLECTOR_PHASE.lock(), gc::CollectorPhase::Ready);
+        assert_eq!(*COLLECTOR_PHASE.lock(), CollectorPhase::Ready);
 
-        let obj = unsafe { &*(gc as *const GcBox<gc::OpaqueU8>) };
+        let obj = unsafe { &*(gc as *const GcBox<OpaqueU8>) };
         obj.colour() == Colour::Black
     }
 
     pub unsafe fn keep_alive<T>(gc: Gc<T>) {
-        let obj = &mut *(gc.objptr as *mut GcBox<gc::OpaqueU8>);
+        let obj = &mut *(gc.objptr as *mut GcBox<OpaqueU8>);
         obj.set_colour(Colour::Black)
     }
 }
