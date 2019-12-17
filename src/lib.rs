@@ -5,6 +5,8 @@
 #![feature(alloc_layout_extra)]
 #![feature(raw_vec_internals)]
 #![feature(const_fn)]
+#![feature(coerce_unsized)]
+#![feature(unsize)]
 #[cfg(not(all(target_pointer_width = "64", target_arch = "x86_64")))]
 compile_error!("Requires x86_64 with 64 bit pointer width.");
 
@@ -23,8 +25,9 @@ use crate::{
 };
 use std::{
     alloc::{Alloc, Layout},
+    marker::Unsize,
     mem::{forget, transmute, ManuallyDrop},
-    ops::{Deref, DerefMut},
+    ops::{CoerceUnsized, Deref, DerefMut},
 };
 
 use parking_lot::Mutex;
@@ -66,23 +69,24 @@ const GC_ALLOCATION_THRESHOLD: usize = 100;
 /// algorithm. This means that by using `Gc` pointers in a Rust application,
 /// you pull in the overhead of a run-time garbage collector to manage and
 /// free `Gc` values behind the scenes.
-#[derive(Debug)]
-pub struct Gc<T> {
-    objptr: *mut T,
+#[derive(PartialEq, Eq, Debug)]
+pub struct Gc<T: ?Sized> {
+    objptr: *mut GcBox<T>,
 }
 
 impl<T> Gc<T> {
     /// Constructs a new `Gc<T>`.
     pub fn new(v: T) -> Self {
-        let boxed = GcBox::new(v);
         Gc {
-            objptr: boxed as *mut T,
+            objptr: GcBox::new(v),
         }
     }
+}
 
+impl<T: ?Sized> Gc<T> {
     /// Get a raw pointer to the underlying value `T`.
     pub fn as_ptr(&self) -> *const T {
-        self.objptr
+        self.objptr as *const T
     }
 }
 
@@ -90,7 +94,7 @@ impl<T> Gc<T> {
 /// while also permitting multiple, copyable `Gc` references. The `drop` method
 /// on `GcBox` acts as a guard, preventing the destructors on its contents from
 /// running unless the object is really dead.
-pub(crate) struct GcBox<T>(ManuallyDrop<T>);
+pub(crate) struct GcBox<T: ?Sized>(ManuallyDrop<T>);
 
 impl<T> GcBox<T> {
     fn new(value: T) -> *mut GcBox<T> {
@@ -112,7 +116,9 @@ impl<T> GcBox<T> {
 
         ptr
     }
+}
 
+impl<T: ?Sized> GcBox<T> {
     fn metadata(&self) -> BlockMetadata {
         unsafe {
             let headerptr = (self as *const GcBox<T> as *mut BlockHeader).sub(1);
@@ -163,7 +169,7 @@ impl<T> GcBox<T> {
     }
 }
 
-impl<T> Deref for Gc<T> {
+impl<T: ?Sized> Deref for Gc<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -171,13 +177,13 @@ impl<T> Deref for Gc<T> {
     }
 }
 
-impl<T> DerefMut for Gc<T> {
+impl<T: ?Sized> DerefMut for Gc<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { &mut *(self.objptr as *mut T) }
     }
 }
 
-impl<T> Drop for GcBox<T> {
+impl<T: ?Sized> Drop for GcBox<T> {
     fn drop(&mut self) {
         if self.colour() == Colour::Black || self.metadata().dropped {
             return;
@@ -192,11 +198,15 @@ impl<T> Drop for GcBox<T> {
 /// Clone)]` in that the latter only makes `Gc<T>` copyable if `T` is.
 impl<T> Copy for Gc<T> {}
 
-impl<T> Clone for Gc<T> {
+impl<T: ?Sized> Clone for Gc<T> {
     fn clone(&self) -> Self {
-        *self
+        Gc {
+            objptr: self.objptr,
+        }
     }
 }
+
+impl<T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<Gc<U>> for Gc<T> {}
 
 /// Colour of an object used during marking phase (see Dijkstra tri-colour
 /// abstraction)
@@ -246,5 +256,37 @@ impl Debug {
     pub unsafe fn keep_alive<T>(gc: Gc<T>) {
         let obj = &mut *(gc.objptr as *mut GcBox<gc::OpaqueU8>);
         obj.set_colour(Colour::Black)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem::size_of;
+
+    #[test]
+    fn test_trait_obj() {
+        trait HelloWorld {
+            fn hello(&self) -> usize;
+        }
+
+        struct HelloWorldStruct(usize);
+
+        impl HelloWorld for HelloWorldStruct {
+            fn hello(&self) -> usize {
+                self.0
+            }
+        }
+
+        let s = HelloWorldStruct(123);
+        let gcto: Gc<dyn HelloWorld> = Gc::new(s);
+        assert_eq!(size_of::<Gc<dyn HelloWorld>>(), 2 * size_of::<usize>());
+        assert_eq!(gcto.hello(), 123);
+    }
+
+    #[test]
+    fn test_unsized() {
+        let foo: Gc<[i32]> = Gc::new([1, 2, 3]);
+        assert_eq!(foo, foo.clone());
     }
 }
