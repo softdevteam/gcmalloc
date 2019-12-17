@@ -17,7 +17,7 @@
 extern crate gcmalloc;
 
 use gcmalloc::Gc;
-use gcmalloc::gc::DebugFlags;
+use gcmalloc::DebugFlags;
 
 struct S {
     a: usize,

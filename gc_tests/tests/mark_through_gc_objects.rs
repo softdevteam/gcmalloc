@@ -3,7 +3,7 @@
 
 extern crate gcmalloc;
 
-use gcmalloc::{collect, gc::DebugFlags, Debug, Gc};
+use gcmalloc::{collect, DebugFlags, Debug, Gc};
 
 struct GcData {
     a: Gc<usize>,

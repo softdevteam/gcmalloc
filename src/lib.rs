@@ -19,6 +19,8 @@ extern crate packed_struct_codegen;
 pub mod alloc;
 pub mod gc;
 
+pub use gc::DebugFlags;
+
 use crate::{
     alloc::{BlockHeader, BlockMetadata, GcAllocator, GlobalAllocator},
     gc::{Collector, CollectorPhase},
@@ -226,7 +228,7 @@ pub fn collect() {
     COLLECTOR.lock().collect()
 }
 
-pub fn debug_flags(flags: gc::DebugFlags) {
+pub fn debug_flags(flags: DebugFlags) {
     COLLECTOR.lock().debug_flags = flags;
 }
 
