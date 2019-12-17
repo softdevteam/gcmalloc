@@ -16,7 +16,7 @@ extern crate packed_struct;
 #[macro_use]
 extern crate packed_struct_codegen;
 
-pub mod alloc;
+pub mod allocator;
 pub mod collector;
 pub mod gc;
 
@@ -24,7 +24,7 @@ pub use collector::DebugFlags;
 pub use gc::Gc;
 
 use crate::{
-    alloc::{GcAllocator, GlobalAllocator},
+    allocator::{GcAllocator, GlobalAllocator},
     collector::{Collector, CollectorPhase, OpaqueU8},
     gc::{Colour, GcBox},
 };

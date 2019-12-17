@@ -1,5 +1,5 @@
 use crate::{
-    alloc::{GcVec, PtrInfo},
+    allocator::{GcVec, PtrInfo, HEAP_TOP},
     gc::{Colour, GcBox},
     ALLOCATOR, COLLECTOR_PHASE, GC_ALLOCATION_THRESHOLD, GC_ALLOCATOR,
 };
@@ -338,7 +338,7 @@ impl Collector {
     fn check_pointer(&mut self, word: Word) {
         // Since the heap starts at the end of the data segment, we can use this
         // as the lower heap bound.
-        if word >= self.data_segment_end && word <= unsafe { crate::alloc::HEAP_TOP } {
+        if word >= self.data_segment_end && word <= unsafe { HEAP_TOP } {
             if let Some(block) = ALLOCATOR
                 .iter()
                 // It's legal to hold a pointer 1 byte past the end of a block,

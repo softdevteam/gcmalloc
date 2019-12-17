@@ -5,7 +5,7 @@ use std::{
     ops::{CoerceUnsized, Deref, DerefMut},
 };
 
-use crate::alloc::{BlockHeader, BlockMetadata};
+use crate::allocator::{BlockHeader, BlockMetadata};
 
 use crate::GC_ALLOCATOR;
 
