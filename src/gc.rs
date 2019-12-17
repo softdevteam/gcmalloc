@@ -3,6 +3,7 @@ use std::{
     marker::Unsize,
     mem::{forget, transmute, ManuallyDrop},
     ops::{CoerceUnsized, Deref, DerefMut},
+    ptr::NonNull,
 };
 
 use crate::allocator::{BlockHeader, BlockMetadata};
@@ -36,14 +37,14 @@ use crate::GC_ALLOCATOR;
 /// free `Gc` values behind the scenes.
 #[derive(PartialEq, Eq, Debug)]
 pub struct Gc<T: ?Sized> {
-    pub(crate) objptr: *mut GcBox<T>,
+    pub(crate) objptr: NonNull<GcBox<T>>,
 }
 
 impl<T> Gc<T> {
     /// Constructs a new `Gc<T>`.
     pub fn new(v: T) -> Self {
         Gc {
-            objptr: GcBox::new(v),
+            objptr: unsafe { NonNull::new_unchecked(GcBox::new(v)) },
         }
     }
 }
@@ -51,7 +52,7 @@ impl<T> Gc<T> {
 impl<T: ?Sized> Gc<T> {
     /// Get a raw pointer to the underlying value `T`.
     pub fn as_ptr(&self) -> *const T {
-        self.objptr as *const T
+        self.objptr.as_ptr() as *const T
     }
 }
 
@@ -138,13 +139,13 @@ impl<T: ?Sized> Deref for Gc<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { &*(self.objptr as *const T) }
+        unsafe { &*(self.objptr.as_ptr() as *const T) }
     }
 }
 
 impl<T: ?Sized> DerefMut for Gc<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *(self.objptr as *mut T) }
+        unsafe { &mut *(self.objptr.as_ptr() as *mut T) }
     }
 }
 
@@ -210,5 +211,10 @@ mod tests {
     fn test_unsized() {
         let foo: Gc<[i32]> = Gc::new([1, 2, 3]);
         assert_eq!(foo, foo.clone());
+    }
+
+    #[test]
+    fn test_nonnull_opt() {
+        assert_eq!(size_of::<Option<Gc<usize>>>(), size_of::<usize>())
     }
 }
