@@ -1,36 +1,32 @@
+// Run-time:
+//  status: success
+
 extern crate gcmalloc;
 
 use gcmalloc::{collect, DebugFlags, Debug, Gc};
 
 struct GcData {
     a: Gc<usize>,
-    b: Gc<Gc<usize>>,
+    b: Gc<usize>,
 }
 
 impl GcData {
-    fn new(a: Gc<usize>, b: Gc<Gc<usize>>) -> Self {
+    fn new(a: Gc<usize>, b: Gc<usize>) -> Self {
         Self { a, b }
     }
-}
-
-fn make_objgraph() -> Vec<GcData> {
-    let mut gcs = Vec::new();
-    for i in 1..1000 {
-        gcs.push(GcData::new(Gc::new(i), Gc::new(Gc::new(1))))
-    }
-    gcs
 }
 
 fn main() {
     gcmalloc::debug_flags(DebugFlags::new().sweep_phase(false));
 
-    let objgraph = make_objgraph();
+    let mut gcs = Vec::new();
+    for i in 1..100 {
+        gcs.push(Gc::new(i))
+    }
+
     gcmalloc::collect();
 
-    // for gcdata in objgraph.iter() {
-    //     for i in gcdata.b.iter() {
-    //         assert!(Debug::is_black(*i));
-    //     }
-    //     // assert!(Debug::is_black(gcdata.a));
-    // }
+    for gc in gcs.iter() {
+        assert!(Debug::is_black(gc.as_ptr() as *mut u8));
+    }
 }

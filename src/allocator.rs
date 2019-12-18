@@ -111,13 +111,17 @@ unsafe fn dealloc(ptr: *mut u8, layout: Layout) {
 unsafe fn realloc(ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
     ALLOC_LOCK.lock();
     let old_hp = (ptr as *mut BlockHeader).sub(1);
-    let header = ::std::ptr::read(old_hp);
+    let mut header = ::std::ptr::read(old_hp);
 
     let (l2, uoff) = Layout::new::<BlockHeader>().extend(layout).unwrap();
     let p = System.realloc(ptr.sub(uoff), l2, new_size + uoff).add(uoff);
 
     let new_hp = (p as *mut BlockHeader).sub(1);
-    header.metadata().size = (new_size as u64).into();
+    let mut md = header.metadata();
+
+    assert_eq_size!(usize, u64);
+    md.size = (new_size as u64).into();
+    header.set_metadata(md);
 
     BlockHeader::patch_next(header.prev, new_hp);
     BlockHeader::patch_prev(header.next, new_hp);
