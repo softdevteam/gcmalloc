@@ -321,7 +321,7 @@ impl Collector {
 
         for stack_address in (rsp..stack_top).step_by(WORD_SIZE) {
             let stack_word = unsafe { *(stack_address as *const Word) };
-            self.check_pointer(stack_word)
+            self.check_pointer(stack_word);
         }
     }
 

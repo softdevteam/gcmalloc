@@ -16,6 +16,9 @@ extern crate packed_struct;
 #[macro_use]
 extern crate packed_struct_codegen;
 
+#[macro_use]
+extern crate static_assertions;
+
 pub mod allocator;
 pub mod collector;
 pub mod gc;
