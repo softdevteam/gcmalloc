@@ -1,6 +1,7 @@
 use std::{
     alloc::{Alloc, Layout},
     any::Any,
+    fmt,
     marker::Unsize,
     mem::{forget, transmute, ManuallyDrop},
     ops::{CoerceUnsized, Deref, DerefMut},
@@ -73,6 +74,12 @@ impl<T: ?Sized> Gc<T> {
 
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
         this.objptr.as_ptr() == other.objptr.as_ptr()
+    }
+}
+
+impl<T: ?Sized + fmt::Display> fmt::Display for Gc<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&**self, f)
     }
 }
 
