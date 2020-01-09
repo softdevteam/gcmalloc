@@ -70,6 +70,10 @@ impl<T: ?Sized> Gc<T> {
         let ptr: *const T = &*this;
         ptr
     }
+
+    pub fn ptr_eq(this: &Self, other: &Self) -> bool {
+        this.objptr.as_ptr() == other.objptr.as_ptr()
+    }
 }
 
 /// A `GcBox` is a 0-cost wrapper which allows a single `Drop` implementation
