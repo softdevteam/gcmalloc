@@ -3,7 +3,7 @@
 
 extern crate gcmalloc;
 
-use gcmalloc::{collect, DebugFlags, Debug, Gc};
+use gcmalloc::{collect, Debug, DebugFlags, Gc};
 
 static mut SOME_ROOT: Option<Gc<String>> = None;
 

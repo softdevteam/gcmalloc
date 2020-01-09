@@ -12,6 +12,6 @@ export PATH=`pwd`/.cargo/bin/:$PATH
 
 rustup component add --toolchain nightly rustfmt-preview || cargo +nightly install --force rustfmt-nightly
 
-cargo +nightly fmt --all -- --check
+cargo +nightly fmt --all -- --check gc_tests/tests/*
 
 cargo test

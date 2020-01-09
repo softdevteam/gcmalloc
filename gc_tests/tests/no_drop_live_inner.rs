@@ -3,7 +3,7 @@
 
 extern crate gcmalloc;
 
-use gcmalloc::{DebugFlags, Debug, Gc};
+use gcmalloc::{Debug, DebugFlags, Gc};
 
 static mut COUNTER: usize = 0;
 

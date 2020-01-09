@@ -3,7 +3,7 @@
 
 extern crate gcmalloc;
 
-use gcmalloc::{collect, DebugFlags, Debug, Gc};
+use gcmalloc::{collect, Debug, DebugFlags, Gc};
 
 #[inline(never)]
 fn setup_obj() -> Box<*mut u8> {
