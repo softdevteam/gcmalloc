@@ -1,5 +1,6 @@
 use std::{
     alloc::{Alloc, Layout},
+    any::Any,
     marker::Unsize,
     mem::{forget, transmute, ManuallyDrop},
     ops::{CoerceUnsized, Deref, DerefMut},
@@ -45,6 +46,20 @@ impl<T> Gc<T> {
     pub fn new(v: T) -> Self {
         Gc {
             objptr: unsafe { NonNull::new_unchecked(GcBox::new(v)) },
+        }
+    }
+}
+
+impl Gc<dyn Any> {
+    pub fn downcast<T: Any>(&self) -> Result<Gc<T>, Gc<dyn Any>> {
+        if (*self).is::<T>() {
+            let ptr = self.objptr.cast::<GcBox<T>>();
+            forget(self);
+            Ok(Gc { objptr: ptr })
+        } else {
+            Err(Gc {
+                objptr: self.objptr,
+            })
         }
     }
 }
