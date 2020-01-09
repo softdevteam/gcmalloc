@@ -178,7 +178,7 @@ impl<T: ?Sized> Drop for GcBox<T> {
 /// `Copy` and `Clone` are implemented manually because a reference to `Gc<T>`
 /// should be copyable regardless of `T`. It differs subtly from `#[derive(Copy,
 /// Clone)]` in that the latter only makes `Gc<T>` copyable if `T` is.
-impl<T> Copy for Gc<T> {}
+impl<T: ?Sized> Copy for Gc<T> {}
 
 impl<T: ?Sized> Clone for Gc<T> {
     fn clone(&self) -> Self {
