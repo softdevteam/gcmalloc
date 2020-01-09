@@ -11,11 +11,13 @@ fn main() {
     gcmalloc::set_threshold(threshold);
 
     let x = Gc::new("Hello World".to_string());
-    assert!(!Debug::is_black(x.as_ptr() as *mut String as *mut u8));
+    assert!(!Debug::is_black(
+        Gc::into_raw(x.clone()) as *mut String as *mut u8
+    ));
 
     for i in 0..threshold {
         let x = Gc::new(123 as usize);
     }
 
-    assert!(Debug::is_black(x.as_ptr() as *mut String as *mut u8));
+    assert!(Debug::is_black(Gc::into_raw(x) as *mut String as *mut u8));
 }

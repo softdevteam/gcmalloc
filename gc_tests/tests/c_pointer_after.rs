@@ -14,7 +14,7 @@ fn setup_obj() -> Box<*mut u8> {
     //
     // We box it to prevent the original pointer rooting the object through a
     // stale register across the call
-    Box::new(unsafe { a.as_ptr().add(1) as *mut u8 })
+    Box::new(unsafe { Gc::into_raw(a).add(1) as *mut u8 })
 }
 
 #[inline(never)]

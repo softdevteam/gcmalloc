@@ -66,8 +66,9 @@ impl Gc<dyn Any> {
 
 impl<T: ?Sized> Gc<T> {
     /// Get a raw pointer to the underlying value `T`.
-    pub fn as_ptr(&self) -> *const T {
-        self.objptr.as_ptr() as *const T
+    pub fn into_raw(this: Self) -> *const T {
+        let ptr: *const T = &*this;
+        ptr
     }
 }
 

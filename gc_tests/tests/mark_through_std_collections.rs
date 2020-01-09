@@ -27,6 +27,6 @@ fn main() {
     gcmalloc::collect();
 
     for gc in gcs.iter() {
-        assert!(Debug::is_black(gc.as_ptr() as *mut u8));
+        assert!(Debug::is_black(Gc::into_raw(gc.clone()) as *mut u8));
     }
 }
