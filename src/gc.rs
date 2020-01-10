@@ -8,7 +8,7 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::allocator::{BlockHeader, BlockMetadata};
+use crate::allocator::Block;
 
 use crate::GC_ALLOCATOR;
 
@@ -112,53 +112,32 @@ impl<T> GcBox<T> {
 }
 
 impl<T: ?Sized> GcBox<T> {
-    fn metadata(&self) -> BlockMetadata {
-        unsafe {
-            let headerptr = (self as *const GcBox<T> as *mut BlockHeader).sub(1);
-            (&*headerptr).metadata()
-        }
-    }
-
-    fn set_metadata(&mut self, header: BlockMetadata) {
-        unsafe {
-            let headerptr = (self as *const GcBox<T> as *mut BlockHeader).sub(1);
-            (*headerptr).set_metadata(header)
-        }
-    }
-
-    pub(crate) fn set_colour(&mut self, colour: Colour) {
-        let mut metadata = self.metadata();
-        match colour {
-            Colour::Black => metadata.mark_bit = true,
-            Colour::White => metadata.mark_bit = false,
-        }
-        self.set_metadata(metadata);
+    fn block(&self) -> Block {
+        Block::new(self as *const GcBox<T> as *mut u8)
     }
 
     pub(crate) fn colour(&self) -> Colour {
-        let metadata = self.metadata();
-        if metadata.mark_bit {
-            Colour::Black
-        } else {
-            Colour::White
-        }
+        self.block().colour()
+    }
+
+    pub(crate) fn set_colour(&mut self, colour: Colour) {
+        self.block().set_colour(colour);
     }
 
     pub(crate) fn set_dropped(&mut self, value: bool) {
-        let mut metadata = self.metadata();
-        metadata.dropped = value.into();
-        self.set_metadata(metadata);
+        self.block().set_dropped(value);
     }
 
     pub(crate) fn set_drop_vptr(&mut self, value: *mut u8) {
-        let mut metadata = self.metadata();
-        metadata.drop_vptr = (value as u64).into();
-        self.set_metadata(metadata);
+        self.block().set_drop_vptr(value);
     }
 
     pub(crate) fn drop_vptr(&self) -> *mut u8 {
-        let vptr = *self.metadata().drop_vptr as u64;
-        vptr as usize as *mut u8
+        self.block().drop_vptr()
+    }
+
+    pub(crate) fn dropped(&self) -> bool {
+        self.block().dropped()
     }
 }
 
@@ -178,7 +157,7 @@ impl<T: ?Sized> DerefMut for Gc<T> {
 
 impl<T: ?Sized> Drop for GcBox<T> {
     fn drop(&mut self) {
-        if self.colour() == Colour::Black || self.metadata().dropped {
+        if self.colour() == Colour::Black || self.dropped() {
             return;
         }
         self.set_dropped(true);
