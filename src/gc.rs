@@ -1,6 +1,7 @@
 use std::{
     alloc::{Alloc, Layout},
     any::Any,
+    fmt,
     marker::Unsize,
     mem::{forget, transmute, ManuallyDrop},
     ops::{CoerceUnsized, Deref, DerefMut},
@@ -66,8 +67,19 @@ impl Gc<dyn Any> {
 
 impl<T: ?Sized> Gc<T> {
     /// Get a raw pointer to the underlying value `T`.
-    pub fn as_ptr(&self) -> *const T {
-        self.objptr.as_ptr() as *const T
+    pub fn into_raw(this: Self) -> *const T {
+        let ptr: *const T = &*this;
+        ptr
+    }
+
+    pub fn ptr_eq(this: &Self, other: &Self) -> bool {
+        this.objptr.as_ptr() == other.objptr.as_ptr()
+    }
+}
+
+impl<T: ?Sized + fmt::Display> fmt::Display for Gc<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&**self, f)
     }
 }
 
@@ -177,7 +189,7 @@ impl<T: ?Sized> Drop for GcBox<T> {
 /// `Copy` and `Clone` are implemented manually because a reference to `Gc<T>`
 /// should be copyable regardless of `T`. It differs subtly from `#[derive(Copy,
 /// Clone)]` in that the latter only makes `Gc<T>` copyable if `T` is.
-impl<T> Copy for Gc<T> {}
+impl<T: ?Sized> Copy for Gc<T> {}
 
 impl<T: ?Sized> Clone for Gc<T> {
     fn clone(&self) -> Self {

@@ -3,7 +3,7 @@
 
 extern crate gcmalloc;
 
-use gcmalloc::{collect, DebugFlags, Debug, Gc};
+use gcmalloc::{collect, Debug, DebugFlags, Gc};
 
 struct GcData {
     a: Gc<usize>,
@@ -48,6 +48,6 @@ fn main() {
     let x = objgraph.a.unwrap().b;
     let y = objgraph.b;
 
-    assert!(Debug::is_black(x.as_ptr() as *mut u8));
-    assert!(Debug::is_black(y.as_ptr() as *mut u8));
+    assert!(Debug::is_black(Gc::into_raw(x) as *mut u8));
+    assert!(Debug::is_black(Gc::into_raw(y) as *mut u8));
 }

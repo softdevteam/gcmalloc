@@ -3,7 +3,7 @@
 
 extern crate gcmalloc;
 
-use gcmalloc::{collect, DebugFlags, Debug, Gc};
+use gcmalloc::{collect, Debug, DebugFlags, Gc};
 
 struct Node {
     data: String,
@@ -37,26 +37,21 @@ fn main() {
     let a = make_objgraph();
     gcmalloc::collect();
 
-    // Test a
     assert_eq!(a.data, String::from("a"));
-    assert!(Debug::is_black(a.as_ptr() as *mut u8));
-
-    // Test b
     assert_eq!(a.edge.unwrap().data, String::from("b"));
-    assert!(Debug::is_black(a.edge.unwrap().as_ptr() as *mut u8));
-
-    // Test c
     assert_eq!(a.edge.unwrap().edge.unwrap().data, String::from("c"));
-    assert!(Debug::is_black(
-        a.edge.unwrap().edge.unwrap().as_ptr() as *mut u8
-    ));
-
-    // Test c -> a
     assert_eq!(
         a.edge.unwrap().edge.unwrap().edge.unwrap().data,
         String::from("a")
     );
+
     assert!(Debug::is_black(
-        a.edge.unwrap().edge.unwrap().edge.unwrap().as_ptr() as *mut u8
+        Gc::into_raw(a.edge.unwrap().edge.unwrap().edge.unwrap()) as *mut u8
+    ));
+
+    assert!(Debug::is_black(Gc::into_raw(a) as *mut u8));
+    assert!(Debug::is_black(Gc::into_raw(a.edge.unwrap()) as *mut u8));
+    assert!(Debug::is_black(
+        Gc::into_raw(a.edge.unwrap().edge.unwrap()) as *mut u8
     ));
 }

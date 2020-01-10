@@ -3,15 +3,13 @@
 
 extern crate gcmalloc;
 
-use gcmalloc::{collect, DebugFlags, Debug, Gc};
+use gcmalloc::{collect, Debug, DebugFlags, Gc};
 
 static mut SOME_ROOT: Option<Gc<String>> = None;
 
 #[inline(never)]
 fn setup_root() {
-    unsafe{ println!("SOME_ROOT: {:?}", &SOME_ROOT as *const _ ) };
-    unsafe { SOME_ROOT = Some(Gc::new("hello world".to_string()))};
-
+    unsafe { SOME_ROOT = Some(Gc::new("hello world".to_string())) };
 }
 
 fn main() {
@@ -24,5 +22,5 @@ fn main() {
     setup_root();
 
     gcmalloc::collect();
-    unsafe {assert!(Debug::is_black(SOME_ROOT.unwrap().as_ptr() as *mut u8)) };
+    unsafe { assert!(Debug::is_black(Gc::into_raw(SOME_ROOT.unwrap()) as *mut u8)) };
 }
