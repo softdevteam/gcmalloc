@@ -1,13 +1,7 @@
 use crate::{
-    allocator::{GcVec, PtrInfo, HEAP_TOP},
-    gc::{Colour, GcBox},
-    ALLOCATOR, COLLECTOR_PHASE, GC_ALLOCATION_THRESHOLD, GC_ALLOCATOR,
-};
-
-use std::{
-    alloc::{Alloc, Layout},
-    mem::{align_of_val, size_of_val, transmute},
-    ptr::NonNull,
+    allocator::{Block, GcVec, HEAP_TOP},
+    gc::Colour,
+    ALLOCATOR, COLLECTOR_PHASE, GC_ALLOCATION_THRESHOLD,
 };
 
 static WORD_SIZE: usize = std::mem::size_of::<usize>(); // in bytes
@@ -124,10 +118,10 @@ pub(crate) struct Collector {
     /// Used during the mark phase. The marking worklist consists of allocation
     /// blocks which still need tracing. Once the worklist is empty, the marking
     /// phase is complete, and the full object-graph has been traversed.
-    worklist: GcVec<PtrInfo>,
+    worklist: GcVec<Block>,
 
-    /// Holds pointers to unreachable objects awaiting destruction.
-    drop_queue: GcVec<usize>,
+    /// Holds pointers to unreachable blocks awaiting destruction.
+    drop_queue: GcVec<Block>,
 
     /// Flags used to turn on/off certain collection phases for debugging &
     /// testing purposes.
@@ -210,9 +204,10 @@ impl Collector {
     /// This sets the mark-bits of all garbage-collected objects to white.
     fn enter_preparation_phase(&mut self) {
         COLLECTOR_PHASE.lock().update(CollectorPhase::Preparation);
-        for block in ALLOCATOR.iter().filter(|x| x.gc) {
-            let obj = unsafe { &mut *(block.ptr as *mut GcBox<OpaqueU8>) };
-            obj.set_colour(Colour::White);
+        for mut block in ALLOCATOR.iter() {
+            if block.header().metadata().is_gc {
+                block.set_colour(Colour::White)
+            }
         }
     }
 
@@ -228,18 +223,18 @@ impl Collector {
         COLLECTOR_PHASE.lock().update(CollectorPhase::Marking);
 
         while !self.worklist.is_empty() {
-            let PtrInfo { ptr, size, gc } = self.worklist.pop().unwrap();
+            let mut block = self.worklist.pop().unwrap();
+            let md = block.header().metadata();
 
-            if gc {
-                let obj = unsafe { &mut *(ptr as *mut GcBox<OpaqueU8>) };
-                if obj.colour() == Colour::Black {
+            if md.is_gc {
+                if block.colour() == Colour::Black {
                     continue;
                 }
-                obj.set_colour(Colour::Black);
+                block.set_colour(Colour::Black);
             }
 
             // Check each word in the allocation block for pointers.
-            for addr in (ptr..ptr + size).step_by(WORD_SIZE) {
+            for addr in block.range().step_by(WORD_SIZE) {
                 let word = unsafe { *(addr as *const Word) };
                 self.check_pointer(word);
             }
@@ -256,11 +251,9 @@ impl Collector {
     fn enter_sweep_phase(&mut self) {
         COLLECTOR_PHASE.lock().update(CollectorPhase::Sweeping);
 
-        for block in ALLOCATOR.iter().filter(|x| x.gc) {
-            let obj = unsafe { &*(block.ptr as *mut GcBox<OpaqueU8>) };
-            if obj.colour() == Colour::White {
-                self.drop_queue
-                    .push(obj as *const GcBox<OpaqueU8> as *const u8 as usize);
+        for block in ALLOCATOR.iter() {
+            if block.header().metadata().is_gc && block.colour() == Colour::White {
+                self.drop_queue.push(block)
             }
         }
     }
@@ -275,38 +268,9 @@ impl Collector {
     fn enter_drop_phase(&mut self) {
         COLLECTOR_PHASE.lock().update(CollectorPhase::Finalization);
 
-        for i in self.drop_queue.iter().cloned() {
-            let boxptr = i as *mut GcBox<OpaqueU8>;
-            unsafe {
-                let vptr = (&*boxptr).drop_vptr();
-                let fatptr: &mut dyn Drop = transmute((boxptr, vptr));
-                ::std::ptr::drop_in_place(fatptr);
-            }
-            self.dealloc(boxptr);
-        }
-
-        self.drop_queue = GcVec::new()
-    }
-
-    /// Free the contents of a Gc<T>. It is deliberately not a monomorphised
-    /// because during collection, the concrete type of T is unknown. Instead,
-    /// an arbitrary placeholder type is used to represent the contents as the
-    /// actual type's size and alignment are dynamically fetched from the `Gc`s
-    /// vtable.
-    ///
-    /// A raw pointer to a known `Gc<T>` can be passed to this method by
-    /// creating a hollow `Gc<Placeholder>` struct with `Gc::from_raw`.
-    /// `Gc::new()` must *not* be used.
-    fn dealloc(&self, boxptr: *mut GcBox<OpaqueU8>) {
-        let vptr = unsafe { (&*boxptr).drop_vptr() };
-        let drop_trobj: &mut dyn Drop = unsafe { transmute((boxptr, vptr)) };
-        let size = size_of_val(drop_trobj);
-        let align = align_of_val(drop_trobj);
-
-        unsafe {
-            let layout = Layout::from_size_align_unchecked(size, align);
-            let ptr = boxptr as *mut GcBox<OpaqueU8> as *mut u8;
-            GC_ALLOCATOR.dealloc(NonNull::new_unchecked(ptr), layout);
+        while !self.drop_queue.is_empty() {
+            let block = self.drop_queue.pop().unwrap();
+            unsafe { block.drop() }
         }
     }
 
@@ -317,7 +281,7 @@ impl Collector {
     /// and spill all registers which may contain roots.
     #[no_mangle]
     extern "sysv64" fn scan_stack(&mut self, rsp: Address) {
-        let stack_top = unsafe { get_stack_start() }.unwrap();
+        let stack_top = unsafe { get_stack_start().unwrap() };
 
         for stack_address in (rsp..stack_top).step_by(WORD_SIZE) {
             let stack_word = unsafe { *(stack_address as *const Word) };
@@ -344,7 +308,7 @@ impl Collector {
                 // It's legal to hold a pointer 1 byte past the end of a block,
                 // but we can still use find because this will never over-run
                 // the size of the next block's header.
-                .find(|x| x.ptr == word || word > x.ptr && word <= x.ptr + x.size )
+                .find(|x| x.in_bounds(word))
             {
                 self.worklist.push(block);
             }

@@ -132,10 +132,6 @@ impl<T: ?Sized> GcBox<T> {
         self.block().set_drop_vptr(value);
     }
 
-    pub(crate) fn drop_vptr(&self) -> *mut u8 {
-        self.block().drop_vptr()
-    }
-
     pub(crate) fn dropped(&self) -> bool {
         self.block().dropped()
     }
