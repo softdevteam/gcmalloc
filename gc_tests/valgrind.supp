@@ -2,6 +2,6 @@
    <uninitialized_stack>
    Memcheck:Cond
    ...
-   fun:_ZN8gcmalloc9collector9Collector13check_pointer*
+   fun:_ZN8gcmalloc9allocator5Block4find*
 }
 
