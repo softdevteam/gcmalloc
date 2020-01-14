@@ -7,7 +7,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use crate::COLLECTOR;
+use crate::{gc::Colour, COLLECTOR};
 
 use packed_struct::prelude::*;
 
@@ -215,6 +215,78 @@ impl BlockHeader {
 
     pub(crate) fn set_metadata(&mut self, metadata: BlockMetadata) {
         self.metadata = metadata.pack();
+    }
+}
+
+/// A zero-cost wrapper around a pointer to an allocation block.
+///
+/// This interface is used by the rest of the collector to access header
+/// information of a block.
+///
+/// # Safety
+///
+/// This interface is inherently unsafe, it is no more than a wrapper around a
+/// raw pointer and makes no guarnatees about the liveness of the block it
+/// represents. Use of the `Block` API without first establishing that the
+/// corresponding allocation block is live can lead to use-after-frees.
+///
+/// This API is safe to use on uninitialized blocks, as a Block's header is
+/// always constructed before a block pointer is returned to the application.
+///
+pub(crate) struct Block {
+    base: *mut u8,
+}
+
+impl Block {
+    pub(crate) fn new(ptr: *mut u8) -> Self {
+        Self { base: ptr }
+    }
+
+    pub(crate) fn header(&self) -> &'static BlockHeader {
+        unsafe { &*(self.base as *const Block as *const BlockHeader).sub(1) }
+    }
+
+    pub(crate) fn header_mut(&mut self) -> &mut BlockHeader {
+        unsafe { &mut *(self.base as *mut Block as *mut BlockHeader).sub(1) }
+    }
+
+    pub(crate) fn colour(&self) -> Colour {
+        let md = self.header().metadata();
+        if md.mark_bit {
+            Colour::Black
+        } else {
+            Colour::White
+        }
+    }
+
+    pub(crate) fn set_colour(&mut self, colour: Colour) {
+        let mut md = self.header().metadata();
+        match colour {
+            Colour::Black => md.mark_bit = true,
+            Colour::White => md.mark_bit = false,
+        }
+        self.header_mut().set_metadata(md);
+    }
+
+    pub(crate) fn dropped(&self) -> bool {
+        self.header().metadata().dropped
+    }
+
+    pub(crate) fn set_dropped(&mut self, value: bool) {
+        let mut md = self.header().metadata();
+        md.dropped = value.into();
+        self.header_mut().set_metadata(md);
+    }
+
+    pub(crate) fn drop_vptr(&self) -> *mut u8 {
+        let vptr = *self.header().metadata().drop_vptr as u64;
+        vptr as usize as *mut u8
+    }
+
+    pub(crate) fn set_drop_vptr(&mut self, value: *mut u8) {
+        let mut md = self.header().metadata();
+        md.drop_vptr = (value as u64).into();
+        self.header_mut().set_metadata(md);
     }
 }
 
