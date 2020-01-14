@@ -15,7 +15,7 @@ type Word = usize;
 /// bytes.
 pub(crate) struct OpaqueU8(u8);
 
-type StackScanCallback = extern "sysv64" fn(&mut Collector, Address);
+type StackScanCallback = unsafe extern "sysv64" fn(*mut Collector, Address);
 #[link(name = "SpillRegisters", kind = "static")]
 extern "sysv64" {
     // Pass a type-punned pointer to the collector and move it to the asm spill
@@ -114,14 +114,14 @@ impl DebugFlags {
 ///
 /// During a collection, each phase is run consecutively and requires all
 /// mutator threads to come to a complete stop.
-pub(crate) struct Collector {
+pub(crate) struct Collector<'a> {
     /// Used during the mark phase. The marking worklist consists of allocation
     /// blocks which still need tracing. Once the worklist is empty, the marking
     /// phase is complete, and the full object-graph has been traversed.
-    worklist: GcVec<Block>,
+    worklist: GcVec<Block<'a>>,
 
     /// Holds pointers to unreachable blocks awaiting destruction.
-    drop_queue: GcVec<Block>,
+    drop_queue: GcVec<Block<'a>>,
 
     /// Flags used to turn on/off certain collection phases for debugging &
     /// testing purposes.
@@ -140,7 +140,7 @@ pub(crate) struct Collector {
     data_segment_end: usize,
 }
 
-impl Collector {
+impl<'a> Collector<'a> {
     pub(crate) const fn new() -> Self {
         Self {
             worklist: GcVec::new(),
@@ -280,12 +280,13 @@ impl Collector {
     /// assembly stub which is expected to get the contents of the stack pointer
     /// and spill all registers which may contain roots.
     #[no_mangle]
-    extern "sysv64" fn scan_stack(&mut self, rsp: Address) {
-        let stack_top = unsafe { get_stack_start().unwrap() };
+    unsafe extern "sysv64" fn scan_stack(collector: *mut Collector, rsp: Address) {
+        let c = &mut *collector;
+        let stack_top = get_stack_start().unwrap();
 
         for stack_address in (rsp..stack_top).step_by(WORD_SIZE) {
-            let stack_word = unsafe { *(stack_address as *const Word) };
-            self.check_pointer(stack_word);
+            let stack_word = *(stack_address as *const Word);
+            c.check_pointer(stack_word);
         }
     }
 

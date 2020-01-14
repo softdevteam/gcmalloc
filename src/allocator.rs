@@ -2,6 +2,7 @@ use stdalloc::raw_vec::RawVec;
 
 use std::{
     alloc::{Alloc, AllocErr, GlobalAlloc, Layout, System},
+    marker::PhantomData,
     ptr,
     ptr::NonNull,
     sync::atomic::{AtomicBool, Ordering},
@@ -234,13 +235,17 @@ impl BlockHeader {
 /// always constructed before a block pointer is returned to the application.
 ///
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Block {
+pub(crate) struct Block<'a> {
     base: *mut u8,
+    _lifetime: PhantomData<&'a ()>,
 }
 
-impl Block {
+impl<'a> Block<'a> {
     pub(crate) fn new(ptr: *mut u8) -> Self {
-        Self { base: ptr }
+        Self {
+            base: ptr,
+            _lifetime: PhantomData,
+        }
     }
 
     pub fn range(&self) -> ::std::ops::Range<usize> {
@@ -317,8 +322,8 @@ impl Block {
     }
 }
 
-unsafe impl Send for Block {}
-unsafe impl Sync for Block {}
+unsafe impl<'a> Send for Block<'a> {}
+unsafe impl<'a> Sync for Block<'a> {}
 
 struct AllocLock(AtomicBool);
 
@@ -343,17 +348,19 @@ impl GlobalAllocator {
         BlocksIter {
             idx: 0,
             next: unsafe { LAST_ALLOCED },
+            _lifetime: PhantomData,
         }
     }
 }
 
-pub(crate) struct BlocksIter {
+pub(crate) struct BlocksIter<'a> {
     idx: usize,
     next: *mut BlockHeader,
+    _lifetime: PhantomData<&'a ()>,
 }
 
-impl Iterator for BlocksIter {
-    type Item = Block;
+impl<'a> Iterator for BlocksIter<'a> {
+    type Item = Block<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.next.is_null() {
