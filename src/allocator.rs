@@ -233,6 +233,7 @@ impl BlockHeader {
 /// This API is safe to use on uninitialized blocks, as a Block's header is
 /// always constructed before a block pointer is returned to the application.
 ///
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Block {
     base: *mut u8,
 }
@@ -242,7 +243,18 @@ impl Block {
         Self { base: ptr }
     }
 
-    pub(crate) fn header(&self) -> &'static BlockHeader {
+    pub fn range(&self) -> ::std::ops::Range<usize> {
+        let start = self.base as usize;
+        let end = self.base as usize + *self.header().metadata().size as usize;
+        ::std::ops::Range { start, end }
+    }
+
+    pub(crate) fn in_bounds(&self, word: usize) -> bool {
+        let addr = self.base as usize;
+        word == addr || word > addr && word <= addr + *self.header().metadata().size as usize
+    }
+
+    pub(crate) fn header(&self) -> &BlockHeader {
         unsafe { &*(self.base as *const Block as *const BlockHeader).sub(1) }
     }
 
@@ -288,7 +300,25 @@ impl Block {
         md.drop_vptr = (value as u64).into();
         self.header_mut().set_metadata(md);
     }
+
+    pub(crate) unsafe fn drop(self) {
+        debug_assert!(
+            self.header().metadata().is_gc,
+            "Can only call drop on Gc values"
+        );
+        let vptr = self.drop_vptr();
+        let fatptr: &mut dyn Drop = ::std::mem::transmute((self.base, vptr));
+        let size = ::std::mem::size_of_val(fatptr);
+        let align = ::std::mem::align_of_val(fatptr);
+        let layout = Layout::from_size_align_unchecked(size, align);
+
+        ::std::ptr::drop_in_place(fatptr);
+        crate::GC_ALLOCATOR.dealloc(NonNull::new_unchecked(self.base), layout);
+    }
 }
+
+unsafe impl Send for Block {}
+unsafe impl Sync for Block {}
 
 struct AllocLock(AtomicBool);
 
@@ -323,24 +353,20 @@ pub(crate) struct BlocksIter {
 }
 
 impl Iterator for BlocksIter {
-    type Item = PtrInfo;
+    type Item = Block;
 
-    fn next(&mut self) -> Option<PtrInfo> {
+    fn next(&mut self) -> Option<Self::Item> {
         if self.next.is_null() {
             return None;
         }
 
         let header = unsafe { ptr::read(self.next) };
-        let res = Some(PtrInfo {
-            ptr: unsafe { (self.next).add(1) } as usize,
-            size: *header.metadata().size as usize,
-            gc: header.metadata().is_gc,
-        });
+        let res = unsafe { Block::new(self.next.add(1) as *mut u8) };
 
         self.idx += 1;
         self.next = header.prev;
 
-        res
+        Some(res)
     }
 }
 
@@ -428,15 +454,4 @@ impl<T> ::std::ops::DerefMut for GcVec<T> {
             ::std::slice::from_raw_parts_mut(p, self.len)
         }
     }
-}
-
-/// Information about an allocation block used by the collector.
-#[derive(Debug, PartialEq, Eq, Copy, Clone)]
-pub struct PtrInfo {
-    /// The pointer to the beginning of the allocation block.
-    pub ptr: usize,
-    /// The size of the allocation block in bytes.
-    pub size: usize,
-    /// Whether the allocation block is managed by the GC or Rust's RAII.
-    pub gc: bool,
 }
