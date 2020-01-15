@@ -1,5 +1,5 @@
 use crate::{
-    allocator::{Block, GcVec, HEAP_TOP},
+    allocator::{Block, GcVec},
     gc::Colour,
     ALLOCATOR, COLLECTOR_PHASE, GC_ALLOCATION_THRESHOLD,
 };
@@ -15,14 +15,14 @@ type Word = usize;
 /// bytes.
 pub(crate) struct OpaqueU8(u8);
 
-type StackScanCallback = extern "sysv64" fn(&mut Collector, Address);
+type StackScanCallback = unsafe extern "sysv64" fn(Address, *mut MarkingCtxt);
 #[link(name = "SpillRegisters", kind = "static")]
 extern "sysv64" {
     // Pass a type-punned pointer to the collector and move it to the asm spill
     // code. This is so it can be passed straight back as the implicit `self`
     // address in the callback.
     #[allow(improper_ctypes)]
-    fn spill_registers(collector: *mut u8, callback: StackScanCallback);
+    fn spill_registers(callback: StackScanCallback, ctxt: *mut MarkingCtxt);
 }
 
 /// Used to denote which phase the collector is in at a given point in time.
@@ -88,6 +88,13 @@ impl DebugFlags {
     }
 }
 
+pub(crate) struct MarkingCtxt<'mrk> {
+    pub(crate) worklist: GcVec<Block<'mrk>>,
+    pub(crate) stack_start: usize,
+    pub(crate) data_segment_start: usize,
+    pub(crate) data_segment_end: usize,
+}
+
 /// A collector responsible for finding and freeing unreachable objects.
 ///
 /// It is implemented as a stop-the-world, conservative, mark-sweep GC. A full
@@ -115,13 +122,8 @@ impl DebugFlags {
 /// During a collection, each phase is run consecutively and requires all
 /// mutator threads to come to a complete stop.
 pub(crate) struct Collector {
-    /// Used during the mark phase. The marking worklist consists of allocation
-    /// blocks which still need tracing. Once the worklist is empty, the marking
-    /// phase is complete, and the full object-graph has been traversed.
-    worklist: GcVec<Block>,
-
     /// Holds pointers to unreachable blocks awaiting destruction.
-    drop_queue: GcVec<Block>,
+    drop_queue: GcVec<Block<'static>>,
 
     /// Flags used to turn on/off certain collection phases for debugging &
     /// testing purposes.
@@ -132,25 +134,15 @@ pub(crate) struct Collector {
 
     /// The number of GC values allocated since the last collection.
     pub(crate) allocations: usize,
-
-    /// The data segment houses statics and consts, the former can contain roots
-    /// so the entire segment needs scanning during collection. The range bounds
-    /// are always word aligned addresses from low to high.
-    data_segment_start: usize,
-    data_segment_end: usize,
 }
 
 impl Collector {
     pub(crate) const fn new() -> Self {
         Self {
-            worklist: GcVec::new(),
             drop_queue: GcVec::new(),
             debug_flags: DebugFlags::new(),
             allocation_threshold: GC_ALLOCATION_THRESHOLD,
             allocations: 0,
-
-            data_segment_start: 0,
-            data_segment_end: 0,
         }
     }
 
@@ -170,19 +162,7 @@ impl Collector {
             self.enter_preparation_phase();
         }
 
-        if self.data_segment_start == 0 || self.data_segment_end == 0 {
-            let (s, e) = unsafe { get_data_segment_range() };
-            self.data_segment_start = s;
-            self.data_segment_end = e;
-        }
-
         COLLECTOR_PHASE.lock().update(CollectorPhase::Marking);
-
-        // Register spilling is platform specific. This is implemented in
-        // an assembly stub. The fn to scan the stack is passed as a callback
-        unsafe { spill_registers(self as *mut Collector as *mut u8, Collector::scan_stack) }
-
-        self.scan_statics();
 
         if self.debug_flags.mark_phase {
             self.enter_mark_phase();
@@ -219,11 +199,30 @@ impl Collector {
     /// The mark phase colours blocks in the worklist which are managed by the
     /// collector. It also traverses the contents of **all** blocks for further
     /// pointers.
-    fn enter_mark_phase(&mut self) {
+    fn enter_mark_phase<'mrk>(&mut self) {
         COLLECTOR_PHASE.lock().update(CollectorPhase::Marking);
 
-        while !self.worklist.is_empty() {
-            let mut block = self.worklist.pop().unwrap();
+        let stack_start = unsafe { get_stack_start().unwrap() };
+        let (data_segment_start, data_segment_end) = unsafe { get_data_segment_range() };
+
+        let mut ctxt = MarkingCtxt {
+            worklist: GcVec::new(),
+            stack_start,
+            data_segment_start,
+            data_segment_end,
+        };
+
+        // Register spilling is platform specific. This is implemented in
+        // an assembly stub. The fn to scan the stack is passed as a callback
+        unsafe { spill_registers(Collector::scan_stack, &mut ctxt) }
+
+        self.scan_statics(&mut ctxt);
+        self.mark_objects(&mut ctxt);
+    }
+
+    fn mark_objects<'mrk>(&mut self, ctxt: &mut MarkingCtxt<'mrk>) {
+        while !ctxt.worklist.is_empty() {
+            let mut block = ctxt.worklist.pop().unwrap();
             let md = block.header().metadata();
 
             if md.is_gc {
@@ -236,7 +235,9 @@ impl Collector {
             // Check each word in the allocation block for pointers.
             for addr in block.range().step_by(WORD_SIZE) {
                 let word = unsafe { *(addr as *const Word) };
-                self.check_pointer(word);
+                if let Some(block) = Block::find(word, ctxt) {
+                    ctxt.worklist.push(block)
+                }
             }
         }
     }
@@ -280,37 +281,25 @@ impl Collector {
     /// assembly stub which is expected to get the contents of the stack pointer
     /// and spill all registers which may contain roots.
     #[no_mangle]
-    extern "sysv64" fn scan_stack(&mut self, rsp: Address) {
-        let stack_top = unsafe { get_stack_start().unwrap() };
+    unsafe extern "sysv64" fn scan_stack<'mrk>(rsp: Address, ctxt: *mut MarkingCtxt<'mrk>) {
+        let ctxt = &mut *ctxt;
 
-        for stack_address in (rsp..stack_top).step_by(WORD_SIZE) {
-            let stack_word = unsafe { *(stack_address as *const Word) };
-            self.check_pointer(stack_word);
+        for stack_address in (rsp..ctxt.stack_start).step_by(WORD_SIZE) {
+            let stack_word = *(stack_address as *const Word);
+            if let Some(block) = Block::find(stack_word, ctxt) {
+                ctxt.worklist.push(block)
+            }
         }
     }
 
     /// Roots can hide inside static variables, so these need scanning for
     /// potential pointers too.
     #[cfg(target_os = "linux")]
-    fn scan_statics(&mut self) {
-        for data_addr in (self.data_segment_start..self.data_segment_end).step_by(WORD_SIZE) {
+    fn scan_statics<'mrk>(&mut self, ctxt: &mut MarkingCtxt<'mrk>) {
+        for data_addr in (ctxt.data_segment_start..ctxt.data_segment_end).step_by(WORD_SIZE) {
             let static_word = unsafe { *(data_addr as *const Word) };
-            self.check_pointer(static_word);
-        }
-    }
-
-    fn check_pointer(&mut self, word: Word) {
-        // Since the heap starts at the end of the data segment, we can use this
-        // as the lower heap bound.
-        if word >= self.data_segment_end && word <= unsafe { HEAP_TOP } {
-            if let Some(block) = ALLOCATOR
-                .iter()
-                // It's legal to hold a pointer 1 byte past the end of a block,
-                // but we can still use find because this will never over-run
-                // the size of the next block's header.
-                .find(|x| x.in_bounds(word))
-            {
-                self.worklist.push(block);
+            if let Some(block) = Block::find(static_word, ctxt) {
+                ctxt.worklist.push(block)
             }
         }
     }

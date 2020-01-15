@@ -18,11 +18,11 @@ spill_registers:
     push %r13
     push %r14
     push %r15
-    // %rdi already contains the 'self' reference to the collector. We move the
-    // function pointer in %rsi to %r8 (a scratch register) so that the stack
-    // pointer can be placed in %rdi as the first arg slot.
-    mov %rsi, %r8
-    mov %rsp, %rsi
+    // %rdi contains the function pointer to our stack scanning code. We move it
+    // to %r8 (a scratch register) so that the stack pointer can be placed in
+    // %rdi as the first arg slot.
+    mov %rdi, %r8
+    mov %rsp, %rdi
     call *%r8
     // Pop all the callee-save registers (ret will pop the return addr)
     add $56, %rsp

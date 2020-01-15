@@ -2,12 +2,13 @@ use stdalloc::raw_vec::RawVec;
 
 use std::{
     alloc::{Alloc, AllocErr, GlobalAlloc, Layout, System},
+    marker::PhantomData,
     ptr,
     ptr::NonNull,
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use crate::{gc::Colour, COLLECTOR};
+use crate::{collector::MarkingCtxt, gc::Colour, ALLOCATOR, COLLECTOR};
 
 use packed_struct::prelude::*;
 
@@ -234,13 +235,17 @@ impl BlockHeader {
 /// always constructed before a block pointer is returned to the application.
 ///
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Block {
+pub(crate) struct Block<'a> {
     base: *mut u8,
+    _lifetime: PhantomData<&'a ()>,
 }
 
-impl Block {
+impl<'a> Block<'a> {
     pub(crate) fn new(ptr: *mut u8) -> Self {
-        Self { base: ptr }
+        Self {
+            base: ptr,
+            _lifetime: PhantomData,
+        }
     }
 
     pub fn range(&self) -> ::std::ops::Range<usize> {
@@ -249,9 +254,21 @@ impl Block {
         ::std::ops::Range { start, end }
     }
 
-    pub(crate) fn in_bounds(&self, word: usize) -> bool {
-        let addr = self.base as usize;
-        word == addr || word > addr && word <= addr + *self.header().metadata().size as usize
+    pub(crate) fn find<'mrk>(word: usize, ctxt: &MarkingCtxt<'mrk>) -> Option<Block<'mrk>> {
+        // Since the heap starts at the end of the data segment, we can use this
+        // as the lower heap bound.
+        if word >= ctxt.data_segment_end && word <= unsafe { HEAP_TOP } {
+            ALLOCATOR.iter()
+                // It's legal to hold a pointer 1 byte past the end of a block,
+                // but we can still use find because this will never over-run
+                // the size of the next block's header.
+                .find(|x| {
+                    let addr = x.base as usize;
+                    word == addr || word > addr && word <= addr + *x.header().metadata().size as usize
+                })
+        } else {
+            None
+        }
     }
 
     pub(crate) fn header(&self) -> &BlockHeader {
@@ -317,8 +334,8 @@ impl Block {
     }
 }
 
-unsafe impl Send for Block {}
-unsafe impl Sync for Block {}
+unsafe impl<'a> Send for Block<'a> {}
+unsafe impl<'a> Sync for Block<'a> {}
 
 struct AllocLock(AtomicBool);
 
@@ -343,17 +360,19 @@ impl GlobalAllocator {
         BlocksIter {
             idx: 0,
             next: unsafe { LAST_ALLOCED },
+            _lifetime: PhantomData,
         }
     }
 }
 
-pub(crate) struct BlocksIter {
+pub(crate) struct BlocksIter<'a> {
     idx: usize,
     next: *mut BlockHeader,
+    _lifetime: PhantomData<&'a ()>,
 }
 
-impl Iterator for BlocksIter {
-    type Item = Block;
+impl<'a> Iterator for BlocksIter<'a> {
+    type Item = Block<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.next.is_null() {
