@@ -88,9 +88,17 @@ impl DebugFlags {
     }
 }
 
+/// Holds information needed for the mark phase of GC
 pub(crate) struct MarkingCtxt<'mrk> {
+    /// The worklist holds references to heap blocks which were identified by
+    /// potential pointers somewhere in the object graph. During marking, the
+    /// entire worklist is traversed in order for a full transitive closure over
+    /// the object graph to be performed.
     pub(crate) worklist: GcVec<Block<'mrk>>,
+    /// The top (or start) of the current thread's stack.
     pub(crate) stack_start: usize,
+    /// The data segment of an ELF binary contains statics. This section needs
+    /// scanning during marking as it could contain GC roots.
     pub(crate) data_segment_start: usize,
     pub(crate) data_segment_end: usize,
 }
