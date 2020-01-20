@@ -164,11 +164,8 @@ pub struct BlockMetadata {
     #[packed_field(size_bits = "1")]
     pub(crate) mark_bit: bool,
     /// The pointer to the vtable for `Gc<T>`s `Drop` implementation.
-    #[packed_field(size_bits = "63", endian = "msb")]
+    #[packed_field(size_bits = "64", endian = "msb")]
     pub(crate) drop_vptr: Integer<u64, packed_bits::Bits63>,
-    /// Has `Drop::drop` been run?
-    #[packed_field(size_bits = "1")]
-    pub(crate) dropped: bool,
 }
 
 impl BlockMetadata {
@@ -178,7 +175,6 @@ impl BlockMetadata {
             is_gc,
             mark_bit: false,
             drop_vptr: (ptr::null_mut::<u8>() as u64).into(),
-            dropped: false,
         }
     }
 }
@@ -294,16 +290,6 @@ impl<'a> Block<'a> {
             Colour::Black => md.mark_bit = true,
             Colour::White => md.mark_bit = false,
         }
-        self.header_mut().set_metadata(md);
-    }
-
-    pub(crate) fn dropped(&self) -> bool {
-        self.header().metadata().dropped
-    }
-
-    pub(crate) fn set_dropped(&mut self, value: bool) {
-        let mut md = self.header().metadata();
-        md.dropped = value.into();
         self.header_mut().set_metadata(md);
     }
 
