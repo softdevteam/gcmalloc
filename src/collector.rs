@@ -10,11 +10,6 @@ type Address = usize;
 
 type Word = usize;
 
-/// Use this type when we do not care about the contents of a Gc. We choose `u8`
-/// because it maps similarly to how C / C++ use char when dealing with raw
-/// bytes.
-pub(crate) struct OpaqueU8(u8);
-
 type StackScanCallback = unsafe extern "sysv64" fn(Address, *mut MarkingCtxt);
 #[link(name = "SpillRegisters", kind = "static")]
 extern "sysv64" {

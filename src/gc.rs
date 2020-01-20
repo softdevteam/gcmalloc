@@ -104,7 +104,7 @@ impl<T> GcBox<T> {
         unsafe {
             let fatptr: &dyn Drop = &*ptr;
             let vptr = transmute::<*const dyn Drop, (usize, *mut u8)>(fatptr).1;
-            (*ptr).set_drop_vptr(vptr);
+            (*ptr).block().set_drop_vptr(vptr);
         }
 
         ptr
@@ -114,17 +114,6 @@ impl<T> GcBox<T> {
 impl<T: ?Sized> GcBox<T> {
     fn block(&self) -> Block {
         Block::new(self as *const GcBox<T> as *mut u8)
-    }
-
-    pub(crate) fn colour(&self) -> Colour {
-        self.block().colour()
-    }
-
-    pub(crate) fn set_colour(&mut self, colour: Colour) {
-        self.block().set_colour(colour);
-    }
-    pub(crate) fn set_drop_vptr(&mut self, value: *mut u8) {
-        self.block().set_drop_vptr(value);
     }
 }
 
@@ -145,7 +134,7 @@ impl<T: ?Sized> DerefMut for Gc<T> {
 impl<T: ?Sized> Drop for GcBox<T> {
     fn drop(&mut self) {
         println!("Dropping GcBox");
-        if self.colour() == Colour::Black {
+        if self.block().colour() == Colour::Black {
             return;
         }
         unsafe { ManuallyDrop::drop(&mut self.0) };
