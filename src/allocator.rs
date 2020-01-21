@@ -8,7 +8,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-use crate::{collector::MarkingCtxt, gc::Colour, ALLOCATOR, COLLECTOR};
+use crate::{gc::Colour, ALLOCATOR, COLLECTOR};
 
 use packed_struct::prelude::*;
 
@@ -164,11 +164,8 @@ pub struct BlockMetadata {
     #[packed_field(size_bits = "1")]
     pub(crate) mark_bit: bool,
     /// The pointer to the vtable for `Gc<T>`s `Drop` implementation.
-    #[packed_field(size_bits = "63", endian = "msb")]
+    #[packed_field(size_bits = "64", endian = "msb")]
     pub(crate) drop_vptr: Integer<u64, packed_bits::Bits63>,
-    /// Has `Drop::drop` been run?
-    #[packed_field(size_bits = "1")]
-    pub(crate) dropped: bool,
 }
 
 impl BlockMetadata {
@@ -178,7 +175,6 @@ impl BlockMetadata {
             is_gc,
             mark_bit: false,
             drop_vptr: (ptr::null_mut::<u8>() as u64).into(),
-            dropped: false,
         }
     }
 }
@@ -254,23 +250,6 @@ impl<'a> Block<'a> {
         ::std::ops::Range { start, end }
     }
 
-    pub(crate) fn find<'mrk>(word: usize, ctxt: &MarkingCtxt<'mrk>) -> Option<Block<'mrk>> {
-        // Since the heap starts at the end of the data segment, we can use this
-        // as the lower heap bound.
-        if word >= ctxt.data_segment_end && word <= unsafe { HEAP_TOP } {
-            ALLOCATOR.iter()
-                // It's legal to hold a pointer 1 byte past the end of a block,
-                // but we can still use find because this will never over-run
-                // the size of the next block's header.
-                .find(|x| {
-                    let addr = x.base as usize;
-                    word == addr || word > addr && word <= addr + *x.header().metadata().size as usize
-                })
-        } else {
-            None
-        }
-    }
-
     pub(crate) fn header(&self) -> &BlockHeader {
         unsafe { &*(self.base as *const Block as *const BlockHeader).sub(1) }
     }
@@ -294,16 +273,6 @@ impl<'a> Block<'a> {
             Colour::Black => md.mark_bit = true,
             Colour::White => md.mark_bit = false,
         }
-        self.header_mut().set_metadata(md);
-    }
-
-    pub(crate) fn dropped(&self) -> bool {
-        self.header().metadata().dropped
-    }
-
-    pub(crate) fn set_dropped(&mut self, value: bool) {
-        let mut md = self.header().metadata();
-        md.dropped = value.into();
         self.header_mut().set_metadata(md);
     }
 
@@ -355,6 +324,39 @@ impl AllocLock {
     }
 }
 
+pub(crate) struct AllocCache<'a>(GcVec<Block<'a>>);
+
+impl<'a> AllocCache<'a> {
+    pub(crate) fn find(&self, word: usize) -> Option<Block<'a>> {
+        match self.binary_search_by(|x| {
+            if x.base as usize + ((*x.header().metadata().size) as usize) < word {
+                ::std::cmp::Ordering::Less
+            } else if x.base as usize > word {
+                ::std::cmp::Ordering::Greater
+            } else {
+                ::std::cmp::Ordering::Equal
+            }
+        }) {
+            Ok(i) => return Some(Block::new(self.0[i].base)),
+            Err(_) => return None,
+        }
+    }
+}
+
+impl<'a> ::std::ops::Deref for AllocCache<'a> {
+    type Target = GcVec<Block<'a>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<'a> ::std::ops::DerefMut for AllocCache<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 impl GlobalAllocator {
     pub(crate) fn iter(&self) -> BlocksIter {
         BlocksIter {
@@ -362,6 +364,19 @@ impl GlobalAllocator {
             next: unsafe { LAST_ALLOCED },
             _lifetime: PhantomData,
         }
+    }
+
+    pub(crate) fn sorted_cache<'a>(&self) -> AllocCache {
+        // This must be unstable as stable sorting allocates, which means we end
+        // up with 0s at the end of our sorted list because the temporary data
+        // structure's metadata will inserted and then cleared.
+
+        let mut cache = GcVec::new();
+        for block in ALLOCATOR.iter() {
+            cache.push(block);
+        }
+        cache.sort_unstable_by_key(|x| x.base);
+        AllocCache(cache)
     }
 }
 

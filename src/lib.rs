@@ -27,9 +27,9 @@ pub use collector::DebugFlags;
 pub use gc::Gc;
 
 use crate::{
-    allocator::{GcAllocator, GlobalAllocator},
-    collector::{Collector, CollectorPhase, OpaqueU8},
-    gc::{Colour, GcBox},
+    allocator::{Block, GcAllocator, GlobalAllocator},
+    collector::{Collector, CollectorPhase},
+    gc::Colour,
 };
 
 use parking_lot::Mutex;
@@ -79,12 +79,12 @@ impl Debug {
     pub fn is_black<T>(gc: *mut T) -> bool {
         assert_eq!(*COLLECTOR_PHASE.lock(), CollectorPhase::Ready);
 
-        let obj = unsafe { &*(gc as *const GcBox<OpaqueU8>) };
-        obj.colour() == Colour::Black
+        let block = Block::new(gc as *mut u8);
+        block.colour() == Colour::Black
     }
 
     pub unsafe fn keep_alive<T>(gc: Gc<T>) {
-        let obj = &mut *(gc.objptr.as_ptr() as *mut GcBox<OpaqueU8>);
-        obj.set_colour(Colour::Black)
+        let mut block = Block::new(gc.objptr.as_ptr() as *mut u8);
+        block.set_colour(Colour::Black);
     }
 }
