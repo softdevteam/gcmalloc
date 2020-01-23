@@ -1,3 +1,5 @@
+use std::{alloc::Layout, mem::transmute};
+
 use crate::{
     allocator::{AllocCache, Block, GcVec, HEAP_TOP},
     gc::Colour,
@@ -318,9 +320,24 @@ impl<'m, 's: 'm> Collector {
     fn enter_sweep_phase(&mut self) {
         COLLECTOR_PHASE.lock().update(CollectorPhase::Sweeping);
 
+        let dummy_vptr = {
+            let dummy = &crate::gc::GcDummyDrop {};
+            let fatptr: &dyn Drop = &*dummy;
+            unsafe { transmute::<*const dyn Drop, (usize, *mut u8)>(fatptr).1 }
+        };
+
         for block in ALLOCATOR.iter() {
             if block.header().metadata().is_gc && block.colour() == Colour::White {
-                self.drop_queue.push(block)
+                if block.drop_vptr() != dummy_vptr {
+                    self.drop_queue.push(block);
+                    continue;
+                }
+
+                // Since we are certain that T has no need for finalization, we
+                // can just dealloc it in-place. We also do not need to provide
+                // a legitimate layout, as we use System alloc/dealloc calls
+                // which require only the base pointer.
+                unsafe { block.dealloc(Layout::new::<usize>()) };
             }
         }
     }
