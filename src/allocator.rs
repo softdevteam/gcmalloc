@@ -299,6 +299,10 @@ impl<'a> Block<'a> {
         let layout = Layout::from_size_align_unchecked(size, align);
 
         ::std::ptr::drop_in_place(fatptr);
+        self.dealloc(layout)
+    }
+
+    pub(crate) unsafe fn dealloc(self, layout: Layout) {
         crate::GC_ALLOCATOR.dealloc(NonNull::new_unchecked(self.base), layout);
     }
 }

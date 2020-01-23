@@ -2,8 +2,8 @@ use std::{
     alloc::{Alloc, Layout},
     any::Any,
     fmt,
-    marker::Unsize,
-    mem::{forget, transmute, ManuallyDrop},
+    marker::{PhantomData, Unsize},
+    mem::{forget, transmute, ManuallyDrop, MaybeUninit},
     ops::{CoerceUnsized, Deref, DerefMut},
     ptr::NonNull,
 };
@@ -39,28 +39,44 @@ use crate::GC_ALLOCATOR;
 /// free `Gc` values behind the scenes.
 #[derive(PartialEq, Eq, Debug)]
 pub struct Gc<T: ?Sized> {
-    pub(crate) objptr: NonNull<GcBox<T>>,
+    pub(crate) ptr: NonNull<GcBox<T>>,
+    _phantom: PhantomData<T>,
 }
 
 impl<T> Gc<T> {
     /// Constructs a new `Gc<T>`.
     pub fn new(v: T) -> Self {
         Gc {
-            objptr: unsafe { NonNull::new_unchecked(GcBox::new(v)) },
+            ptr: unsafe { NonNull::new_unchecked(GcBox::new(v)) },
+            _phantom: PhantomData,
         }
+    }
+
+    /// Constructs a new `Gc<MaybeUninit<T>>` which is capable of storing data
+    /// up-to the size permissible by `layout`.
+    ///
+    /// This can be useful if you want to store a value with a custom layout,
+    /// but have the collector treat the value as if it were T.
+    ///
+    /// `layout` must be at least as large as `T`, and have an alignment which
+    /// is the same, or bigger than `T`.
+    pub fn new_from_layout(layout: Layout) -> Option<Gc<MaybeUninit<T>>> {
+        let tl = Layout::new::<T>();
+        if layout.size() < tl.size() && layout.align() >= tl.align() {
+            return None;
+        }
+        Some(Gc::from_inner(GcBox::new_from_layout(layout)))
     }
 }
 
 impl Gc<dyn Any> {
     pub fn downcast<T: Any>(&self) -> Result<Gc<T>, Gc<dyn Any>> {
         if (*self).is::<T>() {
-            let ptr = self.objptr.cast::<GcBox<T>>();
+            let ptr = self.ptr.cast::<GcBox<T>>();
             forget(self);
-            Ok(Gc { objptr: ptr })
+            Ok(Gc::from_inner(ptr))
         } else {
-            Err(Gc {
-                objptr: self.objptr,
-            })
+            Err(Gc::from_inner(self.ptr))
         }
     }
 }
@@ -68,12 +84,36 @@ impl Gc<dyn Any> {
 impl<T: ?Sized> Gc<T> {
     /// Get a raw pointer to the underlying value `T`.
     pub fn into_raw(this: Self) -> *const T {
-        let ptr: *const T = &*this;
-        ptr
+        this.ptr.as_ptr() as *const T
     }
 
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
-        this.objptr.as_ptr() == other.objptr.as_ptr()
+        this.ptr.as_ptr() == other.ptr.as_ptr()
+    }
+
+    pub fn from_raw(raw: *const T) -> Gc<T> {
+        Gc {
+            ptr: unsafe { NonNull::new_unchecked(raw as *mut GcBox<T>) },
+            _phantom: PhantomData,
+        }
+    }
+
+    fn from_inner(ptr: NonNull<GcBox<T>>) -> Self {
+        Self {
+            ptr,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<T> Gc<MaybeUninit<T>> {
+    /// As with `MaybeUninit::assume_init`, it is up to the caller to guarantee
+    /// that the inner value really is in an initialized state. Calling this
+    /// when the content is not yet fully initialized causes immediate undefined
+    /// behavior.
+    pub unsafe fn assume_init(self) -> Gc<T> {
+        let ptr = self.ptr.as_ptr() as *mut GcBox<MaybeUninit<T>>;
+        Gc::from_inner((&mut *ptr).assume_init())
     }
 }
 
@@ -81,6 +121,14 @@ impl<T: ?Sized + fmt::Display> fmt::Display for Gc<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&**self, f)
     }
+}
+
+/// Used to synthesise a common vptr address which can be compared against for Gc
+/// values which do not need dropping.
+pub(crate) struct GcDummyDrop;
+
+impl Drop for GcDummyDrop {
+    fn drop(&mut self) {}
 }
 
 /// A `GcBox` is a 0-cost wrapper which allows a single `Drop` implementation
@@ -109,6 +157,32 @@ impl<T> GcBox<T> {
 
         ptr
     }
+
+    fn new_from_layout(layout: Layout) -> NonNull<GcBox<MaybeUninit<T>>> {
+        unsafe {
+            let ptr = GC_ALLOCATOR.alloc(layout).unwrap().as_ptr() as *mut GcBox<MaybeUninit<T>>;
+
+            let dummy_t = &layout as *const Layout as *const GcDummyDrop;
+            let fatptr: &dyn Drop = &*dummy_t;
+            let dummy_vptr = transmute::<*const dyn Drop, (usize, *mut u8)>(fatptr).1;
+            (*ptr).block().set_drop_vptr(dummy_vptr);
+
+            NonNull::new_unchecked(ptr)
+        }
+    }
+}
+
+impl<T> GcBox<MaybeUninit<T>> {
+    unsafe fn assume_init(&mut self) -> NonNull<GcBox<T>> {
+        // With T now considered initialized, we must make sure that if GcBox<T>
+        // is reclaimed, T will be dropped. We need to find its vptr and replace the
+        // GcDummyDrop vptr in the block header with it.
+        let data = self.0.get_ref();
+        let fatptr: &dyn Drop = &*(data as *const _ as *const GcBox<T>);
+        let vptr = transmute::<*const dyn Drop, (usize, *mut u8)>(fatptr).1;
+        self.block().set_drop_vptr(vptr);
+        NonNull::new_unchecked(self as *mut _ as *mut GcBox<T>)
+    }
 }
 
 impl<T: ?Sized> GcBox<T> {
@@ -121,19 +195,18 @@ impl<T: ?Sized> Deref for Gc<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { &*(self.objptr.as_ptr() as *const T) }
+        unsafe { &*(self.ptr.as_ptr() as *const T) }
     }
 }
 
 impl<T: ?Sized> DerefMut for Gc<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { &mut *(self.objptr.as_ptr() as *mut T) }
+        unsafe { &mut *(self.ptr.as_ptr() as *mut T) }
     }
 }
 
 impl<T: ?Sized> Drop for GcBox<T> {
     fn drop(&mut self) {
-        println!("Dropping GcBox");
         if self.block().colour() == Colour::Black {
             return;
         }
@@ -148,9 +221,7 @@ impl<T: ?Sized> Copy for Gc<T> {}
 
 impl<T: ?Sized> Clone for Gc<T> {
     fn clone(&self) -> Self {
-        Gc {
-            objptr: self.objptr,
-        }
+        Gc::from_inner(self.ptr)
     }
 }
 

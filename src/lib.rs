@@ -7,6 +7,7 @@
 #![feature(const_fn)]
 #![feature(coerce_unsized)]
 #![feature(unsize)]
+#![feature(maybe_uninit_ref)]
 #[cfg(not(all(target_pointer_width = "64", target_arch = "x86_64")))]
 compile_error!("Requires x86_64 with 64 bit pointer width.");
 
@@ -84,7 +85,7 @@ impl Debug {
     }
 
     pub unsafe fn keep_alive<T>(gc: Gc<T>) {
-        let mut block = Block::new(gc.objptr.as_ptr() as *mut u8);
+        let mut block = Block::new(gc.ptr.as_ptr() as *mut u8);
         block.set_colour(Colour::Black);
     }
 }
