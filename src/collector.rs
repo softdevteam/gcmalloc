@@ -164,14 +164,11 @@ impl<'mrk, 'col> MarkingCtxt<'mrk, 'col> {
     fn process_worklist(&mut self) {
         while !self.worklist.is_empty() {
             let mut block = self.worklist.pop().unwrap();
-            let md = block.header().metadata();
-
-            if md.is_gc {
-                if block.colour() == Colour::Black {
-                    continue;
-                }
-                block.set_colour(Colour::Black);
+            if block.colour() == Colour::Black {
+                continue;
             }
+
+            block.set_colour(Colour::Black);
 
             // Check each word in the allocation block for pointers.
             for addr in block.range().step_by(WORD_SIZE) {
