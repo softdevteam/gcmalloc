@@ -279,9 +279,7 @@ impl<'m, 's: 'm> Collector {
     fn enter_preparation_phase(&mut self, col: &mut CollectionCtxt) {
         COLLECTOR_PHASE.lock().update(CollectorPhase::Preparation);
         for block in col.allocation_cache.iter_mut() {
-            if block.header().metadata().is_gc {
-                block.set_colour(Colour::White)
-            }
+            block.set_colour(Colour::White)
         }
     }
 
