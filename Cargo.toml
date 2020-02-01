@@ -10,6 +10,7 @@ packed_struct = "0.3"
 packed_struct_codegen = "0.3"
 parking_lot = { version = "0.10", features = ["nightly"] }
 static_assertions = "1.1"
+trace_derive = { path = "trace_derive" }
 
 [build-dependencies]
 rerun_except = "0.1"
@@ -23,3 +24,5 @@ tempdir = "0.3"
 name = "gc_tests"
 path = "gc_tests/run_tests.rs"
 harness = false
+
+[workspace]

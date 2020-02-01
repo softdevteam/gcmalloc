@@ -23,6 +23,7 @@ extern crate static_assertions;
 pub mod allocator;
 pub mod collector;
 pub mod gc;
+pub mod trace;
 
 pub use collector::DebugFlags;
 pub use gc::Gc;
