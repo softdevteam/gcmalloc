@@ -1,5 +1,5 @@
 use std::{
-    alloc::{Alloc, Layout},
+    alloc::{AllocRef, Layout},
     any::Any,
     fmt,
     marker::{PhantomData, Unsize},

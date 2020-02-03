@@ -1,7 +1,7 @@
 use stdalloc::raw_vec::RawVec;
 
 use std::{
-    alloc::{Alloc, AllocErr, GlobalAlloc, Layout, System},
+    alloc::{AllocErr, AllocRef, GlobalAlloc, Layout, System},
     marker::PhantomData,
     ptr,
     ptr::NonNull,
@@ -43,7 +43,7 @@ unsafe impl GlobalAlloc for GlobalAllocator {
     }
 }
 
-unsafe impl Alloc for GcAllocator {
+unsafe impl AllocRef for GcAllocator {
     unsafe fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocErr> {
         let mut c = COLLECTOR.lock();
         c.poll();
