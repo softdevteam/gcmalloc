@@ -25,4 +25,9 @@ name = "gc_tests"
 path = "gc_tests/run_tests.rs"
 harness = false
 
+[[test]]
+name = "miri_tests"
+path = "gc_tests/run_miri_tests.rs"
+harness = false
+
 [workspace]
