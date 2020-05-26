@@ -1,7 +1,9 @@
 use stdalloc::raw_vec::RawVec;
 
 use std::{
-    alloc::{AllocErr, AllocRef, GlobalAlloc, Layout, System},
+    alloc::{
+        AllocErr, AllocInit, AllocRef, GlobalAlloc, Layout, MemoryBlock, ReallocPlacement, System,
+    },
     marker::PhantomData,
     ptr,
     ptr::NonNull,
@@ -44,28 +46,36 @@ unsafe impl GlobalAlloc for GlobalAllocator {
 }
 
 unsafe impl AllocRef for GcAllocator {
-    unsafe fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocErr> {
+    fn alloc(&mut self, layout: Layout, _init: AllocInit) -> Result<MemoryBlock, AllocErr> {
         let mut c = COLLECTOR.lock();
         c.poll();
         c.allocations += 1;
         drop(c); // unlock the collector
 
-        let p = alloc(layout, true);
-        Ok(NonNull::new_unchecked(p))
+        let p = unsafe { alloc(layout, true) };
+        Ok(MemoryBlock {
+            ptr: unsafe { NonNull::new_unchecked(p) },
+            size: layout.size(),
+        })
     }
 
     unsafe fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
         dealloc(ptr.as_ptr(), layout);
     }
 
-    unsafe fn realloc(
+    unsafe fn grow(
         &mut self,
         ptr: NonNull<u8>,
         layout: Layout,
         new_size: usize,
-    ) -> Result<NonNull<u8>, AllocErr> {
+        _placement: ReallocPlacement,
+        _init: AllocInit,
+    ) -> Result<MemoryBlock, AllocErr> {
         let newptr = realloc(ptr.as_ptr(), layout, new_size);
-        Ok(NonNull::new_unchecked(newptr))
+        Ok(MemoryBlock {
+            ptr: NonNull::new_unchecked(newptr),
+            size: new_size,
+        })
     }
 }
 
