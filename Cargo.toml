@@ -18,7 +18,7 @@ cc = "1.0"
 
 [dev-dependencies]
 lang_tester = "0.3"
-tempdir = "0.3"
+tempfile = "3.1.0"
 
 [[test]]
 name = "gc_tests"

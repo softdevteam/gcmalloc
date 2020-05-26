@@ -1,5 +1,5 @@
 use std::{
-    alloc::{AllocRef, Layout},
+    alloc::{AllocInit, AllocRef, Layout},
     any::Any,
     fmt,
     marker::{PhantomData, Unsize},
@@ -141,7 +141,13 @@ impl<T> GcBox<T> {
     fn new(value: T) -> *mut GcBox<T> {
         let layout = Layout::new::<T>();
 
-        let ptr = unsafe { GC_ALLOCATOR.alloc(layout).unwrap().as_ptr() } as *mut GcBox<T>;
+        let ptr = unsafe {
+            GC_ALLOCATOR
+                .alloc(layout, AllocInit::Uninitialized)
+                .unwrap()
+                .ptr
+                .as_ptr()
+        } as *mut GcBox<T>;
         let gcbox = GcBox(ManuallyDrop::new(value));
         unsafe {
             ptr.copy_from_nonoverlapping(&gcbox, 1);
@@ -160,7 +166,11 @@ impl<T> GcBox<T> {
 
     fn new_from_layout(layout: Layout) -> NonNull<GcBox<MaybeUninit<T>>> {
         unsafe {
-            let ptr = GC_ALLOCATOR.alloc(layout).unwrap().as_ptr() as *mut GcBox<MaybeUninit<T>>;
+            let ptr = GC_ALLOCATOR
+                .alloc(layout, AllocInit::Uninitialized)
+                .unwrap()
+                .ptr
+                .as_ptr() as *mut GcBox<MaybeUninit<T>>;
 
             let dummy_t = &layout as *const Layout as *const GcDummyDrop;
             let fatptr: &dyn Drop = &*dummy_t;

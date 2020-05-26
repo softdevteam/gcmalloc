@@ -1,7 +1,7 @@
 use std::{env, path::PathBuf, process::Command};
 
 use lang_tester::LangTester;
-use tempdir::TempDir;
+use tempfile::TempDir;
 
 static CRATE_NAME: &'static str = "gcmalloc";
 
@@ -41,7 +41,7 @@ fn main() {
         .output()
         .expect("Failed to build libs");
 
-    let tempdir = TempDir::new("gc_tester").unwrap();
+    let tempdir = TempDir::new().unwrap();
     LangTester::new()
         .test_dir("gc_tests/tests")
         .test_file_filter(|p| {
@@ -86,7 +86,7 @@ fn main() {
         })
         .run();
 
-    let tempdir = TempDir::new("gc_tester").unwrap();
+    let tempdir = TempDir::new().unwrap();
     LangTester::new()
         .test_dir("gc_tests/tests")
         .test_file_filter(|p| p.extension().unwrap().to_str().unwrap() == "rs")
